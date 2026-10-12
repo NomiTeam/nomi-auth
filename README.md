@@ -15,17 +15,17 @@ uv run uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 -
 
 ## 群验证码认证
 
-- 注册：`POST /api/v1/registrations` 只提交 `name`，在群内发送 `注册 <码>`。第一位成功兑换的有效群成员完成绑定，每个成员只允许一个账号。
-- 已有账号或重装启动器：`POST /api/v1/logins` 无需用户名，提交空对象或空请求体，在群内发送 `登录 <码>`。按发送验证码的群成员查找绑定账号；没有账号时返回 ACCOUNT_NOT_FOUND，提示先注册。
-- 启动器用申请私密 `poll_token` 查询状态，再向 `/api/v1/logins/{id}/session` 或 `/api/v1/registrations/{id}/session` 单次领取管理与游戏令牌。公开群码不能查询私有状态或领取令牌。
-- 申请默认 5 分钟有效，验证码验证和会话领取分别只能成功一次。领取响应丢失时重新发起验证码登录，不重复发放凭据。
-- 游戏令牌支持标准 refresh、validate、invalidate 和进服会话。传统 authenticate 和 signout 不接受密码，返回群验证登录提示。
-
-登录无需输入账号名称；修改游戏名时 UUID 不变。管理会话默认一小时，到期通过群验证码重新登录。没有密码修改或密码找回接口。
+- 启动器统一调用 `POST /api/v1/logins`，请求体为空或 `{}`，在群内发送 `登录 <码>`。
+- 插件调用 `/internal/v1/logins/verify`，已有账号返回 VERIFIED 与当前游戏名；没有账号进入 AWAITING_NAME，认领给发送码的成员。
+- 该成员通过 `注册 <id>` 调用 `/internal/v1/logins/register`；原子创建账号、角色与群绑定，进入 VERIFIED。冲突或格式错误记为 FAILED 并结束申请。
+- 使用私密 poll_token 查询和取消申请，再向 `/api/v1/logins/{id}/session` 单次领取会话。申请默认 5 分钟有效；每个成员同一时间只允许一个待注册申请。
+- 群内 `改名 <新id>` 调用 `/internal/v1/profiles/rename`，按事件身份修改本人名称，默认冷却 7 天，UUID 永不改变。
+- 注册、验证、改名结果包含当前 ID（游戏名）与角色 UUID；只有启动器持有的私密凭证可领取令牌，机器人回复不包含任何令牌。
+- 旧 `/api/v1/registrations` 接口保留兼容，当前启动器和机器人不使用。传统 authenticate 和 signout 不接受密码；游戏令牌支持 refresh、validate、invalidate 和进服会话。
 
 ## 数据与维护
 
-SQLite schema 版本 2 会自动移除旧密码字段、撤销旧会话，保留账号、群身份与 UUID。升级前先使用 SQLite backup API 做备份。签名密钥与纹理位于 `NOMI_DATA_DIR`，服务重启复用，不得公开或提交这些文件。
+SQLite schema 版本 2 移除旧密码字段并撤销旧会话；版本 3 添加登录申请认领成员与错误字段。迁移保留账号、群身份与 UUID。升级前先使用 SQLite backup API 做备份。签名密钥与纹理位于 `NOMI_DATA_DIR`，服务重启复用，不得公开或提交这些文件。
 
 ```text
 uv run pytest -q

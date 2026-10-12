@@ -457,3 +457,48 @@ def test_bot_rename_preserves_uuid_and_ends_conflict(client):
         ]
         == "ACCOUNT_NOT_FOUND"
     )
+
+
+def test_unified_code_concurrent_first_claimant_wins(client):
+    request = client.post("/api/v1/logins").json()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda i: verify(client, request, member=str(i), event=str(i), operation="login"), range(2)
+            )
+        )
+    assert sorted(r.status_code for r in results) == [200, 409]
+    winner = next(str(i) for i, result in enumerate(results) if result.status_code == 200)
+    other = "1" if winner == "0" else "0"
+    assert member_command(client, "OtherPlayer", member=other).status_code == 409
+    assert member_command(client, "Winner", member=winner).json()["status"] == "REGISTERED"
+
+
+def test_invalid_registration_ends_request(client):
+    request = client.post("/api/v1/logins").json()
+    verify(client, request, member="new", operation="login")
+    assert member_command(client, "not valid").json()["code"] == "INVALID_NAME"
+    assert member_command(client, "NowValid", event="retry").status_code == 409
+
+
+def test_multiple_renames_keep_uuid_and_failed_replay_stays_failed(client):
+    create_account(client)
+    original = login(client)["game"]["selectedProfile"]["id"]
+    for index, name in enumerate(("AliceTwo", "AliceThree", "ALICE")):
+        with client.app.state.db.write() as conn:
+            conn.execute("UPDATE profiles SET last_renamed_at=0")
+        result = member_command(
+            client, name, member="member", event=f"rename-{index}", operation="rename"
+        ).json()
+        assert result["uuid"] == original and result["name"] == name
+    failed = member_command(
+        client, "AfterCooldown", member="member", event="failed", operation="rename"
+    ).json()
+    assert failed["code"] == "RENAME_COOLDOWN"
+    with client.app.state.db.write() as conn:
+        conn.execute("UPDATE profiles SET last_renamed_at=0")
+    assert (
+        member_command(client, "AfterCooldown", member="member", event="failed", operation="rename").json()
+        == failed
+    )
+    assert login(client, event="after-replay")["game"]["selectedProfile"] == {"id": original, "name": "ALICE"}
