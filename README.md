@@ -29,10 +29,10 @@ uv run python -m nomi_auth.cli enable 注册时的账号名
 
 停用会撤销令牌；已经在线的玩家需由游戏服另行踢出。临时数据自动清理，`cli cleanup` 可手动触发。
 
-## lobby 部署
+## 部署示例
 
-源码、`.venv`、`.env`、`data/` 均在 `/home/naipu/minecraft/nomi-auth`，归 `www-data:www-data`；`.env` 为 0600，data 目录为 0700。`nomi-auth.service` 管理开机自启及失败重启，监听 `127.0.0.1:8000`。
+源码、`.venv`、`.env`、`data/` 均在 `/srv/nomi-auth`，归 `www-data:www-data`；`.env` 为 0600，data 目录为 0700。`nomi-auth.service` 管理开机自启及失败重启，监听 `127.0.0.1:8000`。
 
-公网为 `https://auth.missdrop.cn`。EdgeOne HTTPS 回源 `https.missdrop.cn:20080`，SNI 为 `https.missdrop.cn`，HOST 为 `auth.missdrop.cn`。Nginx 禁止公网访问 `/internal/`，机器人从回环地址调用。配置模板见 `deploy/`，无需 Docker。
+域名、回源地址和端口按实际环境配置。Nginx 禁止公网访问 `/internal/`，机器人从回环地址调用。`deploy/` 中的模板使用前需替换实际路径和配置，无需 Docker。
 
 检查代码：`uv run pytest -q`、`uv run ruff check src tests`。公网 HTTPS 与 authlib-injector 通信已验证，完整游戏进服仍需联调。
