@@ -78,7 +78,7 @@ def test_register_and_private_poll(client):
     assert verify(client, request).status_code == 200
     assert verify(client, request, event="later", member="other").status_code == 409
     assert exchange(client, request).status_code == 200
-    assert exchange(client, request).status_code == 409
+    assert exchange(client, request).status_code == 404
 
 
 def test_bound_member_and_wrong_group_cannot_consume_registration(client):
@@ -115,13 +115,13 @@ def test_cancel_races_with_registration(client):
             client.delete, "/api/v1/registrations/" + request["request_id"], headers=private(request)
         )
         redeem = executor.submit(verify, client, request)
-        assert sorted(r.status_code for r in [cancel.result(), redeem.result()]) == [200, 409]
+        assert sorted(r.status_code for r in [cancel.result(), redeem.result()]) in ([200, 400], [200, 409])
     with client.app.state.db.read() as conn:
         status = conn.execute(
             "SELECT status FROM registrations WHERE id=?", (request["request_id"],)
-        ).fetchone()[0]
+        ).fetchone()
         count = conn.execute("SELECT count(*) FROM accounts").fetchone()[0]
-    assert (status, count) in (("CANCELLED", 0), ("COMPLETED", 1))
+    assert (None if status is None else status[0], count) in ((None, 0), ("COMPLETED", 1))
 
 
 def test_reinstall_login_requires_bound_identity(client):
@@ -136,14 +136,14 @@ def test_reinstall_login_requires_bound_identity(client):
     result = exchange(client, request, "login").json()
     assert result["login_name"] == "Alice"
     assert "accessToken" in result["game"]
-    assert exchange(client, request, "login").status_code == 403
+    assert exchange(client, request, "login").status_code == 404
 
 
 def test_concurrent_exchange_only_issues_once(client):
     request = create_account(client)
     with ThreadPoolExecutor(max_workers=2) as executor:
         responses = list(executor.map(lambda _: exchange(client, request), range(2)))
-    assert sorted(r.status_code for r in responses) == [200, 409]
+    assert sorted(r.status_code for r in responses) == [200, 404]
     with client.app.state.db.read() as conn:
         assert conn.execute("SELECT count(*) FROM tokens").fetchone()[0] == 2
 
@@ -154,12 +154,12 @@ def test_expired_and_cancelled_login(client):
     assert (
         client.delete("/api/v1/logins/" + request["request_id"], headers=private(request)).status_code == 200
     )
-    assert verify(client, request, operation="login").status_code == 409
+    assert verify(client, request, operation="login").status_code == 400
     other = client.post("/api/v1/logins", json={}).json()
     assert verify(client, other, operation="login", event="verified").status_code == 200
     with client.app.state.db.write() as conn:
         conn.execute("UPDATE login_requests SET expires_at=0 WHERE id=?", (other["request_id"],))
-    assert exchange(client, other, "login").status_code == 400
+    assert exchange(client, other, "login").status_code == 404
 
 
 def test_unknown_name_generic_response_and_disabled_account(client):
@@ -393,7 +393,7 @@ def test_unified_registration_conflict_closes_request(client):
         == "FAILED"
     )
     assert member_command(client, "Available", event="again").status_code == 409
-    assert exchange(client, request, "login").status_code == 403
+    assert exchange(client, request, "login").status_code == 404
 
 
 def test_pending_member_only_one_request_expiry_and_cancellation(client):
@@ -409,7 +409,7 @@ def test_pending_member_only_one_request_expiry_and_cancellation(client):
     verify(client, second, member="new", event="retry", operation="login")
     with client.app.state.db.write() as conn:
         conn.execute("UPDATE login_requests SET expires_at=0 WHERE id=?", (second["request_id"],))
-    assert member_command(client, "TooLate", event="late").json()["code"] == "REQUEST_EXPIRED"
+    assert member_command(client, "TooLate", event="late").json()["code"] == "NO_PENDING_REGISTRATION"
 
 
 def test_register_cancel_race_in_unified_flow(client):
@@ -425,10 +425,10 @@ def test_register_cancel_race_in_unified_flow(client):
     with client.app.state.db.read() as conn:
         state = conn.execute(
             "SELECT status FROM login_requests WHERE id=?", (request["request_id"],)
-        ).fetchone()[0]
-    assert state == "CANCELLED"
+        ).fetchone()
+    assert state is None
     assert all(r.status_code in (200, 409) for r in responses)
-    assert exchange(client, request, "login").status_code == 403
+    assert exchange(client, request, "login").status_code == 404
 
 
 def test_bot_rename_preserves_uuid_and_ends_conflict(client):
@@ -552,3 +552,35 @@ def test_launcher_rename_conflict_does_not_change_profile(client):
     )
     assert result.status_code == 409 and result.json()["code"] == "NAME_TAKEN"
     assert login(client, event="still-alice")["game"]["selectedProfile"] == game["selectedProfile"]
+
+
+def test_cleanup_deletes_transients_and_keeps_live_identity(client):
+    import time
+
+    create_account(client)
+    request = client.post("/api/v1/logins").json()
+    session = login(client)
+    with client.app.state.db.write() as conn:
+        conn.execute("UPDATE login_requests SET expires_at=0 WHERE id=?", (request["request_id"],))
+        conn.execute("UPDATE tokens SET expires_at=0 WHERE kind='management'")
+        conn.execute("UPDATE receipts SET created_at=0")
+        conn.execute("UPDATE audit SET created_at=0")
+    client.app.state.db.cleanup(int(time.time()))
+    with client.app.state.db.read() as conn:
+        for table in ("receipts", "audit"):
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+        for table in ("accounts", "profiles", "identities"):
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM login_requests").fetchone()[0] == 0
+    assert client.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 204
+
+
+def test_failed_result_deleted_after_private_read_only(client):
+    create_account(client)
+    request = client.post("/api/v1/logins").json()
+    verify(client, request, member="new", operation="login")
+    member_command(client, "Alice")
+    path = "/api/v1/logins/" + request["request_id"]
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers=private(request)).json()["error"] == "NAME_TAKEN"
+    assert client.get(path, headers=private(request)).status_code == 404

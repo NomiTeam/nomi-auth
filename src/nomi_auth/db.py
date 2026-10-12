@@ -49,7 +49,7 @@ class Database:
         # v2 removes password storage while preserving accounts, identities and UUIDs.
         with self.write() as conn:
             versions = [r[0] for r in conn.execute("SELECT version FROM schema_versions")]
-            if versions and max(versions) > 3:
+            if versions and max(versions) > 4:
                 raise RuntimeError("Database schema is newer than this application")
             for table in ("accounts", "registrations"):
                 columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -71,6 +71,23 @@ class Database:
                 if column not in columns:
                     conn.execute(f"ALTER TABLE login_requests ADD COLUMN {column} TEXT")
             conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(3)")
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(receipts)")}
+            if "created_at" not in columns:
+                conn.execute("ALTER TABLE receipts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
+                conn.execute("UPDATE receipts SET created_at=unixepoch() WHERE created_at=0")
+            conn.execute("CREATE INDEX IF NOT EXISTS receipt_created ON receipts(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS audit_created ON audit(created_at)")
+            conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(4)")
+
+    def cleanup(self, timestamp: int):
+        """Delete expired transient data without touching accounts, identities or UUIDs."""
+        with self.write() as conn:
+            for table in ("tokens", "joins", "registrations", "login_requests"):
+                conn.execute(f"DELETE FROM {table} WHERE expires_at<=?", (timestamp,))
+            for table in ("registrations", "login_requests"):
+                conn.execute(f"DELETE FROM {table} WHERE status='CANCELLED' OR session_issued=1")
+            for table in ("receipts", "audit"):
+                conn.execute(f"DELETE FROM {table} WHERE created_at<=?", (timestamp - 86400,))
 
     def connect(self):
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)

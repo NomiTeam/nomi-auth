@@ -25,7 +25,7 @@ uv run uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 -
 
 ## 数据与维护
 
-SQLite schema 版本 2 移除旧密码字段并撤销旧会话；版本 3 添加登录申请认领成员与错误字段。迁移保留账号、群身份与 UUID。升级前先使用 SQLite backup API 做备份。签名密钥与纹理位于 `NOMI_DATA_DIR`，服务重启复用，不得公开或提交这些文件。
+SQLite schema 版本 2 移除旧密码字段并撤销旧会话；版本 3 添加登录申请认领成员与错误字段，版本 4 添加去重记录时间及清理索引。迁移保留账号、群身份与 UUID。升级前先使用 SQLite backup API 做备份。签名密钥与纹理位于 `NOMI_DATA_DIR`，服务重启复用，不得公开或提交这些文件。
 
 ```text
 uv run pytest -q
@@ -36,7 +36,7 @@ uv run python -m nomi_auth.cli disable Alice
 uv run python -m nomi_auth.cli enable Alice
 ```
 
-备份数据库时同时备份纹理与签名私钥。cleanup 每日执行。停用账号保留群绑定并撤销令牌，已在线玩家由游戏服管理员另行踢出。
+备份数据库时同时备份纹理与签名私钥。服务内部自动清理：领取或取消后删除申请，失败结果经私密查询后删除，访问时删除过期临时数据；后台每 30 秒补扫无人访问的记录。操作日志和消息去重记录保留一天。cleanup 仅用于手动维护。停用账号保留群绑定并撤销令牌，已在线玩家由游戏服管理员另行踢出。
 
 `deploy/` 提供 systemd、环境配置和可选 Nginx 示例，无需 Docker。应用与虚拟环境置于 `/opt/nomi-auth`，服务用户拥有 `/var/lib/nomi-auth`；真实配置放在 `/etc/nomi-auth/service.env`，权限 0600。配置真实 HTTPS 公共地址、证书和内部机器人访问策略。
 

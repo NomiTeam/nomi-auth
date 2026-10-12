@@ -31,36 +31,28 @@ def main():
         print(f"Database snapshot: {args.destination}")
         return
     timestamp = int(time.time())
+    if args.command == "cleanup":
+        db.cleanup(timestamp)
+        print("Expired transient data deleted; receipts and audit retained for one day.")
+        return
     with db.write() as conn:
-        if args.command == "cleanup":
-            conn.execute(
-                "UPDATE registrations SET status='EXPIRED' WHERE status='PENDING' AND expires_at<=?",
-                (timestamp,),
-            )
-            conn.execute("DELETE FROM tokens WHERE expires_at<=?", (timestamp,))
-            conn.execute("DELETE FROM joins WHERE expires_at<=?", (timestamp,))
-            conn.execute("DELETE FROM registrations WHERE expires_at<?", (timestamp - 86400,))
-            conn.execute("DELETE FROM login_requests WHERE expires_at<?", (timestamp - 86400,))
-            # Receipts retained for 24 hours past their application cleanup boundary.
-            print("Expired applications and sessions cleaned; idempotency receipts retained.")
-        else:
-            row = conn.execute(
-                "SELECT id FROM accounts WHERE login_normalized=?", (args.login_name.lower(),)
-            ).fetchone()
-            if not row:
-                parser.error("Account not found")
-            status = "disabled" if args.command == "disable" else "active"
-            conn.execute("UPDATE accounts SET status=? WHERE id=?", (status, row["id"]))
-            conn.execute("DELETE FROM tokens WHERE account_id=?", (row["id"],))
-            conn.execute(
-                "DELETE FROM joins WHERE profile_id IN (SELECT uuid FROM profiles WHERE account_id=?)",
-                (row["id"],),
-            )
-            conn.execute(
-                "INSERT INTO audit(action,account_id,created_at) VALUES(?,?,?)",
-                (args.command, row["id"], timestamp),
-            )
-            print(f"Account {args.login_name}: {status}")
+        row = conn.execute(
+            "SELECT id FROM accounts WHERE login_normalized=?", (args.login_name.lower(),)
+        ).fetchone()
+        if not row:
+            parser.error("Account not found")
+        status = "disabled" if args.command == "disable" else "active"
+        conn.execute("UPDATE accounts SET status=? WHERE id=?", (status, row["id"]))
+        conn.execute("DELETE FROM tokens WHERE account_id=?", (row["id"],))
+        conn.execute(
+            "DELETE FROM joins WHERE profile_id IN (SELECT uuid FROM profiles WHERE account_id=?)",
+            (row["id"],),
+        )
+        conn.execute(
+            "INSERT INTO audit(action,account_id,created_at) VALUES(?,?,?)",
+            (args.command, row["id"], timestamp),
+        )
+        print(f"Account {args.login_name}: {status}")
 
 
 if __name__ == "__main__":

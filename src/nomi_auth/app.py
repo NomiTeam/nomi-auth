@@ -1,6 +1,8 @@
+import asyncio
 import base64
 import io
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -8,6 +10,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager, suppress
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -73,7 +76,26 @@ def now():
 def create_app(settings: Settings | None = None):
     cfg = settings or Settings()
     db = Database(cfg.data_dir / "nomi-auth.sqlite3")
-    app = FastAPI(title="Nomi Auth", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async def sweep():
+            while True:
+                try:
+                    await asyncio.to_thread(db.cleanup, now())
+                except sqlite3.Error:
+                    logging.getLogger(__name__).exception("Transient data cleanup failed")
+                await asyncio.sleep(30)
+
+        task = asyncio.create_task(sweep())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    app = FastAPI(title="Nomi Auth", version="0.1.0", lifespan=lifespan)
     app.state.db = db
     app.state.settings = cfg
     limiter = defaultdict(deque)
@@ -102,6 +124,11 @@ def create_app(settings: Settings | None = None):
                     del limiter[k]
         if blocked:
             return JSONResponse({"code": "RATE_LIMITED", "message": "请求过于频繁"}, 429)
+        # Access-time cleanup also covers expired records when the service was stopped.
+        try:
+            await asyncio.to_thread(db.cleanup, now())
+        except sqlite3.Error:
+            return JSONResponse({"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503)
         response = await call_next(request)
         if not request.url.path.startswith("/textures/"):
             response.headers["Cache-Control"] = "no-store"
@@ -213,8 +240,10 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/v1/registrations/{request_id}")
     def registration_status(request_id: str, authorization: str | None = Header(None)):
-        with db.read() as conn:
+        with db.write() as conn:
             row = registration_record(conn, request_id, authorization)
+            if row["status"] == "FAILED":
+                conn.execute("DELETE FROM registrations WHERE id=?", (request_id,))
         state = "EXPIRED" if row["status"] == "PENDING" and row["expires_at"] <= now() else row["status"]
         return {"status": state, "expires_at": row["expires_at"], "error": row["error"]}
 
@@ -224,7 +253,7 @@ def create_app(settings: Settings | None = None):
             row = registration_record(conn, request_id, authorization)
             if row["status"] != "PENDING":
                 raise Problem("ALREADY_FINISHED", "申请已结束", 409)
-            conn.execute("UPDATE registrations SET status='CANCELLED' WHERE id=?", (request_id,))
+            conn.execute("DELETE FROM registrations WHERE id=?", (request_id,))
         return {"status": "CANCELLED"}
 
     @app.post("/internal/v1/registrations/redeem")
@@ -286,8 +315,8 @@ def create_app(settings: Settings | None = None):
                 audit(conn, "register", account_id)
                 result = {"status": "COMPLETED"}
             conn.execute(
-                "INSERT INTO receipts VALUES(?,?,'register',?,?)",
-                (body.bot_app_id, body.event_id, payload_hash, json.dumps(result)),
+                "INSERT INTO receipts VALUES(?,?,'register',?,?,?)",
+                (body.bot_app_id, body.event_id, payload_hash, json.dumps(result), now()),
             )
         return result
 
@@ -322,8 +351,10 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/v1/logins/{request_id}")
     def login_status(request_id: str, authorization: str | None = Header(None)):
-        with db.read() as conn:
+        with db.write() as conn:
             row = login_record(conn, request_id, authorization)
+            if row["status"] == "FAILED":
+                conn.execute("DELETE FROM login_requests WHERE id=?", (request_id,))
         status = (
             "EXPIRED"
             if row["status"] in ("PENDING", "AWAITING_NAME", "VERIFIED") and row["expires_at"] <= now()
@@ -337,7 +368,7 @@ def create_app(settings: Settings | None = None):
             row = login_record(conn, request_id, authorization)
             if row["status"] not in ("PENDING", "AWAITING_NAME", "VERIFIED"):
                 raise Problem("ALREADY_FINISHED", "申请已结束", 409)
-            conn.execute("UPDATE login_requests SET status='CANCELLED' WHERE id=?", (request_id,))
+            conn.execute("DELETE FROM login_requests WHERE id=?", (request_id,))
         return {"status": "CANCELLED"}
 
     @app.post("/internal/v1/logins/verify")
@@ -399,8 +430,8 @@ def create_app(settings: Settings | None = None):
                 result = {"status": "VERIFIED", "name": profile["name"], "uuid": profile["uuid"]}
                 audit(conn, "qq_login_verified", identity["id"])
             conn.execute(
-                "INSERT INTO receipts VALUES(?,?,'login',?,?)",
-                (body.bot_app_id, body.event_id, payload_hash, json.dumps(result)),
+                "INSERT INTO receipts VALUES(?,?,'login',?,?,?)",
+                (body.bot_app_id, body.event_id, payload_hash, json.dumps(result), now()),
             )
         return result
 
@@ -417,8 +448,15 @@ def create_app(settings: Settings | None = None):
 
     def save_member_receipt(conn, body, operation, result):
         conn.execute(
-            "INSERT INTO receipts VALUES(?,?,?,?,?)",
-            (body.bot_app_id, body.event_id, operation, digest(body.model_dump_json()), json.dumps(result)),
+            "INSERT INTO receipts VALUES(?,?,?,?,?,?)",
+            (
+                body.bot_app_id,
+                body.event_id,
+                operation,
+                digest(body.model_dump_json()),
+                json.dumps(result),
+                now(),
+            ),
         )
 
     @app.post("/internal/v1/logins/register")
@@ -494,7 +532,7 @@ def create_app(settings: Settings | None = None):
         client_token = secret()
         game_token = issue(conn, account["id"], "game", client_token)
         management_token = issue(conn, account["id"], "management")
-        conn.execute(f"UPDATE {table} SET session_issued=1,status='COMPLETED' WHERE id=?", (row["id"],))
+        conn.execute(f"DELETE FROM {table} WHERE id=?", (row["id"],))
         selected = {"id": profile["uuid"], "name": profile["name"]}
         audit(conn, "qq_session_issued", account["id"])
         return {
