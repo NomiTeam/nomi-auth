@@ -1,19 +1,18 @@
 [Unit]
 Description=Nomi account and Yggdrasil service
-After=network.target
-
+After=network-online.target
+Wants=network-online.target
 [Service]
-User=nomi
-Group=nomi
-WorkingDirectory=/opt/nomi-auth
-EnvironmentFile=/etc/nomi-auth/service.env
-ExecStart=/opt/nomi-auth/.venv/bin/uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+User=www-data
+Group=www-data
+WorkingDirectory=/home/naipu/minecraft/nomi-auth
+ExecStart=/home/naipu/minecraft/nomi-auth/.venv/bin/uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
+RestartSec=5
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/nomi-auth
-
+ReadWritePaths=/home/naipu/minecraft/nomi-auth/data
+PrivateTmp=true
 [Install]
 WantedBy=multi-user.target

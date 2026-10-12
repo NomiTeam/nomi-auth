@@ -1,19 +1,16 @@
-# Include inside the http block. Supply your own TLS certificate and domain.
 server {
-    listen 443 ssl;
-    server_name auth.example.com;
-    ssl_certificate /etc/nginx/certs/fullchain.pem;
-    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    listen 20080 ssl;
+    listen [::]:20080 ssl;
+    server_name auth.missdrop.cn https.missdrop.cn;
+    ssl_certificate /etc/letsencrypt/live/https.missdrop.cn/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/https.missdrop.cn/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
     client_max_body_size 2m;
-
+    location /internal/ { deny all; }
     location / {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
-        # Backend listens only on loopback and trusts proxy headers only from loopback.
     }
-    # Same-host bot calls 127.0.0.1:8000 directly. Remote bots require an explicit
-    # allowlist or a private network route in addition to the API bearer token.
-    location /internal/ { deny all; }
 }

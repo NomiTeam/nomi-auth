@@ -38,7 +38,12 @@ uv run python -m nomi_auth.cli enable Alice
 
 备份数据库时同时备份纹理与签名私钥。服务内部自动清理：领取或取消后删除申请，失败结果经私密查询后删除，访问时删除过期临时数据；后台每 30 秒补扫无人访问的记录。操作日志和消息去重记录保留一天。cleanup 仅用于手动维护。停用账号保留群绑定并撤销令牌，已在线玩家由游戏服管理员另行踢出。
 
-`deploy/` 提供 systemd、环境配置和可选 Nginx 示例，无需 Docker。应用与虚拟环境置于 `/opt/nomi-auth`，服务用户拥有 `/var/lib/nomi-auth`；真实配置放在 `/etc/nomi-auth/service.env`，权限 0600。配置真实 HTTPS 公共地址、证书和内部机器人访问策略。
+`deploy/` 提供 systemd、环境配置和 Nginx 示例，无需 Docker。当前服务器统一放在 `/home/naipu/minecraft/nomi-auth`：源码、`.venv/`、`.env`、`data/` 都在应用目录下，归 `www-data:www-data` 所有。`.env` 权限 0600、data 目录 0700。服务 `nomi-auth.service` 开机自启并在失败时重启，后端仅监听 127.0.0.1:8000。
+
+公网域名为 `auth.missdrop.cn`，EdgeOne 以 HTTPS 回源 `https.missdrop.cn:20080`，回源 SNI 为 https.missdrop.cn，Host 为 auth.missdrop.cn。Nginx 复用 https.missdrop.cn 证书，并禁止公网访问 /internal/。EdgeOne/DNS 需在对应控制台配置。
+
+机器人位于 `/home/naipu/minecraft/nomi-bot`，归 mcadmin 所有，由 bot.service 管理，通过回环地址调用后端内部接口。使用 uv 安装到不同用户的虚拟环境时设置 `--link-mode copy`，避免硬链接的所有权相互影响。
+
 
 ## HMCL 原生皮肤上传
 
