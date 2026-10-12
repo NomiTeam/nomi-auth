@@ -34,13 +34,13 @@ def main():
     with db.write() as conn:
         if args.command == "cleanup":
             conn.execute(
-                "UPDATE registrations SET status='EXPIRED',password_hash=NULL WHERE status='PENDING' AND expires_at<=?",
+                "UPDATE registrations SET status='EXPIRED' WHERE status='PENDING' AND expires_at<=?",
                 (timestamp,),
             )
             conn.execute("DELETE FROM tokens WHERE expires_at<=?", (timestamp,))
             conn.execute("DELETE FROM joins WHERE expires_at<=?", (timestamp,))
             conn.execute("DELETE FROM registrations WHERE expires_at<?", (timestamp - 86400,))
-            conn.execute("DELETE FROM recoveries WHERE expires_at<?", (timestamp - 86400,))
+            conn.execute("DELETE FROM login_requests WHERE expires_at<?", (timestamp - 86400,))
             # Receipts retained for 24 hours past their application cleanup boundary.
             print("Expired applications and sessions cleaned; idempotency receipts retained.")
         else:

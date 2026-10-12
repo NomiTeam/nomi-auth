@@ -14,11 +14,11 @@ from fastapi import FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import Settings
 from .db import Database
-from .security import code, code_hash, digest, password_hasher, secret, verify_password
+from .security import code, code_hash, digest, secret
 
 
 class Problem(Exception):
@@ -27,13 +27,13 @@ class Problem(Exception):
 
 
 class Registration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[A-Za-z0-9_]{3,16}$")
-    password: str = Field(min_length=10, max_length=128)
 
 
-class Credentials(BaseModel):
-    username: str = Field(max_length=128)
-    password: str = Field(max_length=128)
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: str = Field(pattern=r"^[A-Za-z0-9_]{3,16}$")
 
 
 class Redemption(BaseModel):
@@ -45,26 +45,12 @@ class Redemption(BaseModel):
 
 
 class Rename(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[A-Za-z0-9_]{3,16}$")
-    password: str = Field(max_length=128)
-
-
-class PasswordChange(BaseModel):
-    old_password: str = Field(max_length=128)
-    new_password: str = Field(min_length=10, max_length=128)
-
-
-class Recovery(BaseModel):
-    username: str = Field(max_length=128)
-
-
-class NewPassword(BaseModel):
-    password: str = Field(min_length=10, max_length=128)
 
 
 class GameRequest(BaseModel):
     username: str = Field(default="", max_length=128)
-    password: str = Field(default="", max_length=128)
     accessToken: str = Field(default="", max_length=256)
     clientToken: str | None = Field(default=None, max_length=256)
     selectedProfile: str | dict[str, str] | None = None
@@ -157,15 +143,6 @@ def create_app(settings: Settings | None = None):
             raise Problem("INVALID_TOKEN", "令牌无效或已过期", 403)
         return row
 
-    def authenticate(username, password):
-        with db.read() as conn:
-            row = conn.execute(
-                "SELECT * FROM accounts WHERE login_normalized=?", (username.lower(),)
-            ).fetchone()
-        if not row or not verify_password(row["password_hash"], password) or row["status"] != "active":
-            raise Problem("INVALID_CREDENTIALS", "登录名或密码错误", 403)
-        return row
-
     def issue(conn, account_id, kind, client_token=None):
         token = secret()
         ttl = cfg.game_token_ttl if kind == "game" else cfg.management_token_ttl
@@ -205,14 +182,12 @@ def create_app(settings: Settings | None = None):
     def register(body: Registration):
         if not availability(body.name)["available"]:
             raise Problem("NAME_TAKEN", "用户名已被使用", 409)
-        hashed = password_hasher.hash(body.password)
         request_id, verification, poll = uuid.uuid4().hex, code(), secret()
         expires = now() + cfg.registration_ttl
         with db.write() as conn:
             conn.execute(
-                "INSERT INTO registrations(id,code_hash,poll_hash,name,password_hash,expires_at) "
-                "VALUES(?,?,?,?,?,?)",
-                (request_id, code_hash(verification), digest(poll), body.name, hashed, expires),
+                "INSERT INTO registrations(id,code_hash,poll_hash,name,expires_at) VALUES(?,?,?,?,?)",
+                (request_id, code_hash(verification), digest(poll), body.name, expires),
             )
         return {
             "request_id": request_id,
@@ -241,9 +216,7 @@ def create_app(settings: Settings | None = None):
             row = registration_record(conn, request_id, authorization)
             if row["status"] != "PENDING":
                 raise Problem("ALREADY_FINISHED", "申请已结束", 409)
-            conn.execute(
-                "UPDATE registrations SET status='CANCELLED',password_hash=NULL WHERE id=?", (request_id,)
-            )
+            conn.execute("UPDATE registrations SET status='CANCELLED' WHERE id=?", (request_id,))
         return {"status": "CANCELLED"}
 
     @app.post("/internal/v1/registrations/redeem")
@@ -280,15 +253,15 @@ def create_app(settings: Settings | None = None):
                 (name.lower(), name.lower()),
             ).fetchone():
                 conn.execute(
-                    "UPDATE registrations SET status='FAILED',error='NAME_TAKEN',password_hash=NULL WHERE id=?",
+                    "UPDATE registrations SET status='FAILED',error='NAME_TAKEN' WHERE id=?",
                     (row["id"],),
                 )
                 result = {"status": "FAILED", "code": "NAME_TAKEN"}
             else:
                 account_id, profile_id = uuid.uuid4().hex, uuid.uuid4().hex
                 conn.execute(
-                    "INSERT INTO accounts(id,login_name,login_normalized,password_hash,created_at) VALUES(?,?,?,?,?)",
-                    (account_id, name, name.lower(), row["password_hash"], now()),
+                    "INSERT INTO accounts(id,login_name,login_normalized,created_at) VALUES(?,?,?,?)",
+                    (account_id, name, name.lower(), now()),
                 )
                 conn.execute(
                     "INSERT INTO profiles(uuid,account_id,name,name_normalized) VALUES(?,?,?,?)",
@@ -299,7 +272,7 @@ def create_app(settings: Settings | None = None):
                     (account_id, body.bot_app_id, body.group_openid, body.member_openid),
                 )
                 conn.execute(
-                    "UPDATE registrations SET status='COMPLETED',account_id=?,password_hash=NULL WHERE id=?",
+                    "UPDATE registrations SET status='COMPLETED',account_id=? WHERE id=?",
                     (account_id, row["id"]),
                 )
                 audit(conn, "register", account_id)
@@ -310,15 +283,137 @@ def create_app(settings: Settings | None = None):
             )
         return result
 
-    @app.post("/api/v1/sessions")
-    def management_login(body: Credentials):
-        account = authenticate(body.username, body.password)
+    @app.post("/api/v1/logins", status_code=201)
+    def login_start(body: LoginRequest):
+        request_id, verification, poll = uuid.uuid4().hex, code(), secret()
+        expires = now() + cfg.registration_ttl
         with db.write() as conn:
-            current = conn.execute("SELECT * FROM accounts WHERE id=?", (account["id"],)).fetchone()
-            if current["status"] != "active" or current["password_hash"] != account["password_hash"]:
-                raise Problem("INVALID_CREDENTIALS", "登录状态已变更，请重新登录", 403)
-            token = issue(conn, account["id"], "management")
-        return {"access_token": token, "expires_in": cfg.management_token_ttl}
+            account = conn.execute(
+                "SELECT id FROM accounts WHERE login_normalized=? AND status='active'",
+                (body.username.lower(),),
+            ).fetchone()
+            # Unknown and disabled names have the same public response as valid accounts.
+            conn.execute(
+                "INSERT INTO login_requests(id,code_hash,poll_hash,account_id,expires_at) VALUES(?,?,?,?,?)",
+                (
+                    request_id,
+                    code_hash(verification),
+                    digest(poll),
+                    account["id"] if account else None,
+                    expires,
+                ),
+            )
+        return {
+            "request_id": request_id,
+            "code": verification,
+            "poll_token": poll,
+            "expires_at": expires,
+            "group_label": cfg.group_label,
+        }
+
+    def login_record(conn, request_id, authorization):
+        row = conn.execute("SELECT * FROM login_requests WHERE id=?", (request_id,)).fetchone()
+        if not row or not secrets.compare_digest(row["poll_hash"], digest(bearer(authorization))):
+            raise Problem("NOT_FOUND", "登录申请不存在或凭证无效", 404)
+        return row
+
+    @app.get("/api/v1/logins/{request_id}")
+    def login_status(request_id: str, authorization: str | None = Header(None)):
+        with db.read() as conn:
+            row = login_record(conn, request_id, authorization)
+        status = (
+            "EXPIRED"
+            if row["status"] in ("PENDING", "VERIFIED") and row["expires_at"] <= now()
+            else row["status"]
+        )
+        return {"status": status, "expires_at": row["expires_at"]}
+
+    @app.delete("/api/v1/logins/{request_id}")
+    def login_cancel(request_id: str, authorization: str | None = Header(None)):
+        with db.write() as conn:
+            row = login_record(conn, request_id, authorization)
+            if row["status"] not in ("PENDING", "VERIFIED"):
+                raise Problem("ALREADY_FINISHED", "申请已结束", 409)
+            conn.execute("UPDATE login_requests SET status='CANCELLED' WHERE id=?", (request_id,))
+        return {"status": "CANCELLED"}
+
+    @app.post("/internal/v1/logins/verify")
+    def login_verify(body: Redemption, authorization: str | None = Header(None)):
+        bot_auth(authorization, body)
+        payload_hash = digest(body.model_dump_json())
+        with db.write() as conn:
+            receipt = conn.execute(
+                "SELECT * FROM receipts WHERE app_id=? AND event_id=? AND operation='login'",
+                (body.bot_app_id, body.event_id),
+            ).fetchone()
+            if receipt:
+                if receipt["payload_hash"] != payload_hash:
+                    raise Problem("EVENT_CONFLICT", "事件参数与原请求不一致", 409)
+                return json.loads(receipt["result"])
+            row = conn.execute(
+                "SELECT * FROM login_requests WHERE code_hash=?", (code_hash(body.code),)
+            ).fetchone()
+            if not row or row["expires_at"] <= now():
+                raise Problem("INVALID_CODE", "登录验证码无效或过期")
+            if row["status"] != "PENDING":
+                raise Problem("CODE_USED", "登录验证码已使用或申请已结束", 409)
+            identity = conn.execute(
+                """SELECT 1 FROM identities i JOIN accounts a ON a.id=i.account_id
+                WHERE i.account_id=? AND i.app_id=? AND i.group_id=? AND i.member_id=? AND a.status='active'""",
+                (row["account_id"], body.bot_app_id, body.group_openid, body.member_openid),
+            ).fetchone()
+            if not identity:
+                raise Problem("IDENTITY_MISMATCH", "必须使用该账号绑定的群成员身份登录", 403)
+            conn.execute("UPDATE login_requests SET status='VERIFIED' WHERE id=?", (row["id"],))
+            result = {"status": "VERIFIED"}
+            conn.execute(
+                "INSERT INTO receipts VALUES(?,?,'login',?,?)",
+                (body.bot_app_id, body.event_id, payload_hash, json.dumps(result)),
+            )
+            audit(conn, "qq_login_verified", row["account_id"])
+        return result
+
+    def exchange_session(conn, row, table, required_status):
+        if row["status"] != required_status:
+            raise Problem("NOT_VERIFIED", "申请尚未验证或已经结束", 403)
+        if row["expires_at"] <= now():
+            raise Problem("REQUEST_EXPIRED", "申请已过期，请重新申请")
+        if row["session_issued"]:
+            raise Problem("SESSION_ALREADY_ISSUED", "登录凭据已领取，请重新发起群验证", 409)
+        account = conn.execute(
+            "SELECT * FROM accounts WHERE id=? AND status='active'", (row["account_id"],)
+        ).fetchone()
+        if not account:
+            raise Problem("ACCOUNT_UNAVAILABLE", "账号不可用", 403)
+        profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
+        client_token = secret()
+        game_token = issue(conn, account["id"], "game", client_token)
+        management_token = issue(conn, account["id"], "management")
+        conn.execute(f"UPDATE {table} SET session_issued=1,status='COMPLETED' WHERE id=?", (row["id"],))
+        selected = {"id": profile["uuid"], "name": profile["name"]}
+        audit(conn, "qq_session_issued", account["id"])
+        return {
+            "login_name": account["login_name"],
+            "management_token": management_token,
+            "game": {
+                "accessToken": game_token,
+                "clientToken": client_token,
+                "selectedProfile": selected,
+                "availableProfiles": [selected],
+            },
+        }
+
+    @app.post("/api/v1/logins/{request_id}/session")
+    def login_exchange(request_id: str, authorization: str | None = Header(None)):
+        with db.write() as conn:
+            row = login_record(conn, request_id, authorization)
+            return exchange_session(conn, row, "login_requests", "VERIFIED")
+
+    @app.post("/api/v1/registrations/{request_id}/session")
+    def registration_exchange(request_id: str, authorization: str | None = Header(None)):
+        with db.write() as conn:
+            row = registration_record(conn, request_id, authorization)
+            return exchange_session(conn, row, "registrations", "COMPLETED")
 
     @app.delete("/api/v1/sessions/current", status_code=204)
     def logout(authorization: str | None = Header(None)):
@@ -338,12 +433,8 @@ def create_app(settings: Settings | None = None):
 
     @app.patch("/api/v1/me/profile/name")
     def rename(body: Rename, authorization: str | None = Header(None)):
-        with db.read() as conn:
-            account = account_for_token(conn, bearer(authorization), "management")
-        if not verify_password(account["password_hash"], body.password):
-            raise Problem("INVALID_CREDENTIALS", "密码错误", 403)
         with db.write() as conn:
-            account_for_token(conn, bearer(authorization), "management")
+            account = account_for_token(conn, bearer(authorization), "management")
             profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
             if profile["last_renamed_at"] and profile["last_renamed_at"] + cfg.rename_cooldown > now():
                 raise Problem("RENAME_COOLDOWN", "尚在改名冷却期", 409)
@@ -358,25 +449,6 @@ def create_app(settings: Settings | None = None):
             )
             audit(conn, "rename", account["id"], json.dumps({"old": profile["name"], "new": body.name}))
         return {"uuid": profile["uuid"], "name": body.name}
-
-    @app.put("/api/v1/me/password", status_code=204)
-    def change_password(body: PasswordChange, authorization: str | None = Header(None)):
-        with db.read() as conn:
-            account = account_for_token(conn, bearer(authorization), "management")
-        if not verify_password(account["password_hash"], body.old_password):
-            raise Problem("INVALID_CREDENTIALS", "原密码错误", 403)
-        hashed = password_hasher.hash(body.new_password)
-        with db.write() as conn:
-            current = account_for_token(conn, bearer(authorization), "management")
-            if current["password_hash"] != account["password_hash"]:
-                raise Problem("STALE_CREDENTIALS", "密码已更新，请重新登录", 409)
-            conn.execute("UPDATE accounts SET password_hash=? WHERE id=?", (hashed, account["id"]))
-            conn.execute("DELETE FROM tokens WHERE account_id=?", (account["id"],))
-            conn.execute(
-                "DELETE FROM joins WHERE profile_id IN (SELECT uuid FROM profiles WHERE account_id=?)",
-                (account["id"],),
-            )
-            audit(conn, "password_change", account["id"])
 
     texture_dir = cfg.data_dir / "textures"
     texture_dir.mkdir(exist_ok=True)
@@ -440,84 +512,11 @@ def create_app(settings: Settings | None = None):
             },
         )
 
-    @app.post("/api/v1/recoveries", status_code=201)
-    def recovery_start(body: Recovery):
-        request_id, verification, poll = uuid.uuid4().hex, code(), secret()
-        expires = now() + cfg.registration_ttl
-        with db.write() as conn:
-            account = conn.execute(
-                "SELECT id FROM accounts WHERE login_normalized=? AND status='active'",
-                (body.username.lower(),),
-            ).fetchone()
-            conn.execute(
-                "INSERT INTO recoveries(id,code_hash,poll_hash,account_id,expires_at) VALUES(?,?,?,?,?)",
-                (
-                    request_id,
-                    code_hash(verification),
-                    digest(poll),
-                    account["id"] if account else None,
-                    expires,
-                ),
-            )
-        return {"request_id": request_id, "code": verification, "poll_token": poll, "expires_at": expires}
-
-    def recovery_record(conn, request_id, auth):
-        row = conn.execute("SELECT * FROM recoveries WHERE id=?", (request_id,)).fetchone()
-        if not row or not secrets.compare_digest(row["poll_hash"], digest(bearer(auth))):
-            raise Problem("NOT_FOUND", "找回申请不存在", 404)
-        if row["expires_at"] <= now():
-            raise Problem("REQUEST_EXPIRED", "找回申请过期")
-        return row
-
-    @app.post("/internal/v1/recoveries/verify")
-    def recovery_verify(body: Redemption, authorization: str | None = Header(None)):
-        bot_auth(authorization, body)
-        with db.write() as conn:
-            row = conn.execute(
-                "SELECT * FROM recoveries WHERE code_hash=?", (code_hash(body.code),)
-            ).fetchone()
-            if not row or row["expires_at"] <= now() or row["status"] not in ("PENDING", "VERIFIED"):
-                raise Problem("INVALID_CODE", "找回验证码无效")
-            identity = conn.execute(
-                "SELECT 1 FROM identities WHERE account_id=? AND app_id=? AND group_id=? AND member_id=?",
-                (row["account_id"], body.bot_app_id, body.group_openid, body.member_openid),
-            ).fetchone()
-            if not identity:
-                raise Problem("IDENTITY_MISMATCH", "该成员无法验证此找回申请", 403)
-            conn.execute("UPDATE recoveries SET status='VERIFIED' WHERE id=?", (row["id"],))
-        return {"status": "VERIFIED"}
-
-    @app.get("/api/v1/recoveries/{request_id}")
-    def recovery_status(request_id: str, authorization: str | None = Header(None)):
-        with db.read() as conn:
-            row = recovery_record(conn, request_id, authorization)
-        return {"status": row["status"], "expires_at": row["expires_at"]}
-
-    @app.post("/api/v1/recoveries/{request_id}/complete", status_code=204)
-    def recovery_complete(request_id: str, body: NewPassword, authorization: str | None = Header(None)):
-        hashed = password_hasher.hash(body.password)
-        with db.write() as conn:
-            row = recovery_record(conn, request_id, authorization)
-            if row["status"] != "VERIFIED":
-                raise Problem("NOT_VERIFIED", "找回尚未验证", 403)
-            conn.execute("UPDATE accounts SET password_hash=? WHERE id=?", (hashed, row["account_id"]))
-            conn.execute("DELETE FROM tokens WHERE account_id=?", (row["account_id"],))
-            conn.execute(
-                "DELETE FROM joins WHERE profile_id IN (SELECT uuid FROM profiles WHERE account_id=?)",
-                (row["account_id"],),
-            )
-            conn.execute("UPDATE recoveries SET status='COMPLETED' WHERE id=?", (request_id,))
-            conn.execute(
-                "UPDATE recoveries SET status='CANCELLED' WHERE account_id=? AND id<>? AND status IN ('PENDING','VERIFIED')",
-                (row["account_id"], request_id),
-            )
-            audit(conn, "password_recovery", row["account_id"])
-
-    install_yggdrasil(app, cfg, db, account_for_token, authenticate, issue)
+    install_yggdrasil(app, cfg, db, account_for_token, issue)
     return app
 
 
-def install_yggdrasil(app, cfg, db, account_for_token, authenticate, issue):
+def install_yggdrasil(app, cfg, db, account_for_token, issue):
     root = "/api/yggdrasil"
     key_path = cfg.data_dir / "texture-signing.pem"
     if not key_path.exists():
@@ -594,30 +593,9 @@ def install_yggdrasil(app, cfg, db, account_for_token, authenticate, issue):
         }
 
     @app.post(root + "/authserver/authenticate")
-    def game_login(body: GameRequest):
-        body = body.model_dump(exclude_none=True)
-        account = authenticate(str(body.get("username", "")), str(body.get("password", "")))
-        client_token = body.get("clientToken") or secret()
-        if not isinstance(client_token, str) or len(client_token) > 256:
-            raise Problem("INVALID_TOKEN", "Invalid client token.")
-        with db.write() as conn:
-            # Recheck credentials against concurrent reset or disable before issuing.
-            current = conn.execute("SELECT * FROM accounts WHERE id=?", (account["id"],)).fetchone()
-            if current["status"] != "active" or current["password_hash"] != account["password_hash"]:
-                raise Problem("INVALID_CREDENTIALS", "Credentials changed.", 403)
-            token = issue(conn, account["id"], "game", client_token)
-            profile = profile_response(
-                conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
-            )
-        response = {
-            "accessToken": token,
-            "clientToken": client_token,
-            "availableProfiles": [profile],
-            "selectedProfile": profile,
-        }
-        if body.get("requestUser"):
-            response["user"] = {"id": account["id"], "properties": []}
-        return response
+    @app.post(root + "/authserver/signout")
+    def legacy_auth_disabled():
+        raise Problem("QQ_LOGIN_REQUIRED", "Use Nomi QQ verification login.", 403)
 
     @app.post(root + "/authserver/refresh")
     def game_refresh(body: GameRequest):
@@ -653,16 +631,6 @@ def install_yggdrasil(app, cfg, db, account_for_token, authenticate, issue):
             ).fetchone()
             if row and ("clientToken" not in body or row["client_token"] == body["clientToken"]):
                 conn.execute("DELETE FROM tokens WHERE hash=?", (row["hash"],))
-
-    @app.post(root + "/authserver/signout", status_code=204)
-    def game_signout(body: Credentials):
-        account = authenticate(body.username, body.password)
-        with db.write() as conn:
-            conn.execute("DELETE FROM tokens WHERE account_id=? AND kind='game'", (account["id"],))
-            conn.execute(
-                "DELETE FROM joins WHERE profile_id IN (SELECT uuid FROM profiles WHERE account_id=?)",
-                (account["id"],),
-            )
 
     @app.post(root + "/sessionserver/session/minecraft/join", status_code=204)
     def join(body: GameRequest):

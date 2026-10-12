@@ -2,11 +2,6 @@ import hashlib
 import secrets
 import string
 
-from argon2 import PasswordHasher
-from argon2.exceptions import InvalidHashError, VerificationError
-
-password_hasher = PasswordHasher()
-
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
@@ -23,10 +18,3 @@ def code() -> str:
 
 def code_hash(value: str) -> str:
     return digest(value.replace("-", "").strip().upper())
-
-
-def verify_password(hashed: str, password: str) -> bool:
-    try:
-        return password_hasher.verify(hashed, password)
-    except (VerificationError, InvalidHashError):
-        return False
