@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import FastAPI, File, Form, Header, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
@@ -61,6 +62,16 @@ class NewPassword(BaseModel):
     password: str = Field(min_length=10, max_length=128)
 
 
+class GameRequest(BaseModel):
+    username: str = Field(default="", max_length=128)
+    password: str = Field(default="", max_length=128)
+    accessToken: str = Field(default="", max_length=256)
+    clientToken: str | None = Field(default=None, max_length=256)
+    selectedProfile: str | dict[str, str] | None = None
+    serverId: str | None = Field(default=None, max_length=256)
+    requestUser: bool = False
+
+
 def now():
     return int(time.time())
 
@@ -77,8 +88,12 @@ def create_app(settings: Settings | None = None):
     @app.middleware("http")
     async def guard(request: Request, call_next):
         # Single-instance rate limiter. Never trust arbitrary X-Forwarded-For values.
-        key = (request.client.host if request.client else "unknown", request.url.path)
-        limit = 20 if request.method == "POST" and request.url.path.startswith("/api/v1/") else 300
+        sensitive = request.method == "POST" and (
+            request.url.path.startswith("/api/v1/")
+            or request.url.path.endswith(("/authenticate", "/signout"))
+        )
+        key = (request.client.host if request.client else "unknown", "sensitive" if sensitive else "general")
+        limit = 20 if sensitive else 300
         with limiter_lock:
             bucket = limiter[key]
             timestamp = time.monotonic()
@@ -111,6 +126,15 @@ def create_app(settings: Settings | None = None):
     @app.exception_handler(sqlite3.OperationalError)
     async def database_error(request, exc):
         return JSONResponse({"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, exc):
+        if request.url.path.startswith("/api/yggdrasil"):
+            return JSONResponse(
+                {"error": "IllegalArgumentException", "errorMessage": "Invalid request."}, 400
+            )
+        # Never echo validation inputs: they may contain a submitted password.
+        return JSONResponse({"code": "INVALID_REQUEST", "message": "请求格式或参数不符合要求"}, 422)
 
     def bearer(header):
         if not header or not header.startswith("Bearer "):
@@ -290,6 +314,9 @@ def create_app(settings: Settings | None = None):
     def management_login(body: Credentials):
         account = authenticate(body.username, body.password)
         with db.write() as conn:
+            current = conn.execute("SELECT * FROM accounts WHERE id=?", (account["id"],)).fetchone()
+            if current["status"] != "active" or current["password_hash"] != account["password_hash"]:
+                raise Problem("INVALID_CREDENTIALS", "登录状态已变更，请重新登录", 403)
             token = issue(conn, account["id"], "management")
         return {"access_token": token, "expires_in": cfg.management_token_ttl}
 
@@ -567,7 +594,8 @@ def install_yggdrasil(app, cfg, db, account_for_token, authenticate, issue):
         }
 
     @app.post(root + "/authserver/authenticate")
-    def game_login(body: dict):
+    def game_login(body: GameRequest):
+        body = body.model_dump(exclude_none=True)
         account = authenticate(str(body.get("username", "")), str(body.get("password", "")))
         client_token = body.get("clientToken") or secret()
         if not isinstance(client_token, str) or len(client_token) > 256:
@@ -592,11 +620,12 @@ def install_yggdrasil(app, cfg, db, account_for_token, authenticate, issue):
         return response
 
     @app.post(root + "/authserver/refresh")
-    def game_refresh(body: dict):
+    def game_refresh(body: GameRequest):
+        body = body.model_dump(exclude_none=True)
         with db.write() as conn:
             account, stored, profile = token_and_profile(conn, body)
             selected = body.get("selectedProfile")
-            if selected and selected.get("id") != profile["uuid"]:
+            if selected and (not isinstance(selected, dict) or selected.get("id") != profile["uuid"]):
                 raise Problem("INVALID_PROFILE", "Invalid profile.", 403)
             conn.execute("DELETE FROM tokens WHERE hash=?", (stored["hash"],))
             token = issue(conn, account["id"], "game", stored["client_token"])
@@ -610,12 +639,14 @@ def install_yggdrasil(app, cfg, db, account_for_token, authenticate, issue):
         return result
 
     @app.post(root + "/authserver/validate", status_code=204)
-    def game_validate(body: dict):
+    def game_validate(body: GameRequest):
+        body = body.model_dump(exclude_none=True)
         with db.read() as conn:
             token_and_profile(conn, body)
 
     @app.post(root + "/authserver/invalidate", status_code=204)
-    def game_invalidate(body: dict):
+    def game_invalidate(body: GameRequest):
+        body = body.model_dump(exclude_none=True)
         with db.write() as conn:
             row = conn.execute(
                 "SELECT * FROM tokens WHERE hash=? AND kind='game'", (digest(body.get("accessToken", "")),)
@@ -634,7 +665,8 @@ def install_yggdrasil(app, cfg, db, account_for_token, authenticate, issue):
             )
 
     @app.post(root + "/sessionserver/session/minecraft/join", status_code=204)
-    def join(body: dict):
+    def join(body: GameRequest):
+        body = body.model_dump(exclude_none=True)
         server_id = body.get("serverId")
         if not isinstance(server_id, str) or not 1 <= len(server_id) <= 256:
             raise Problem("INVALID_SESSION", "Invalid server ID.")

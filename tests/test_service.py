@@ -199,3 +199,77 @@ def test_recovery_requires_original_identity(client):
     path = "/api/v1/recoveries/" + request["request_id"] + "/complete"
     assert client.post(path, headers=private, json={"password": "recovered-password"}).status_code == 204
     assert client.post(path, headers=private, json={"password": "recovered-again"}).status_code == 403
+
+
+def test_cancel_races_with_redemption(client):
+    request = request_account(client)
+    private = {"Authorization": "Bearer " + request["poll_token"]}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cancel = executor.submit(
+            client.delete, "/api/v1/registrations/" + request["request_id"], headers=private
+        )
+        exchange = executor.submit(redeem, client, request)
+        results = [cancel.result(), exchange.result()]
+    assert sorted(r.status_code for r in results) == [200, 409]
+    with client.app.state.db.read() as conn:
+        row = conn.execute("SELECT status FROM registrations WHERE id=?", (request["request_id"],)).fetchone()
+        count = conn.execute("SELECT count(*) FROM accounts").fetchone()[0]
+    assert (row["status"], count) in (("CANCELLED", 0), ("COMPLETED", 1))
+
+
+def test_restart_keeps_pending_request_and_signing_key(client):
+    request = request_account(client)
+    public = client.get("/api/yggdrasil").json()["signaturePublickey"]
+    restarted = TestClient(create_app(client.app.state.settings))
+    assert restarted.get("/api/yggdrasil").json()["signaturePublickey"] == public
+    assert redeem(restarted, request).status_code == 200
+
+
+def test_game_bad_payload_is_not_server_error(client):
+    for path in ("authenticate", "refresh", "validate", "invalidate"):
+        response = client.post("/api/yggdrasil/authserver/" + path, json={"username": [], "accessToken": []})
+        assert response.status_code == 400
+        assert response.json()["error"] == "IllegalArgumentException"
+
+
+def test_invalid_request_does_not_echo_password(client):
+    response = client.post("/api/v1/registrations", json={"name": "Alice", "password": "short"})
+    assert response.status_code == 422
+    assert "short" not in response.text
+
+
+def test_game_token_cannot_manage_account(client):
+    create_account(client)
+    token = client.post(
+        "/api/yggdrasil/authserver/authenticate", json={"username": "Alice", "password": PASSWORD}
+    ).json()["accessToken"]
+    assert client.get("/api/v1/me", headers={"Authorization": "Bearer " + token}).status_code == 403
+
+
+def test_skin_is_reencoded_and_has_signed_url(client):
+    import json
+
+    from PIL.PngImagePlugin import PngInfo
+
+    create_account(client)
+    headers = login(client)
+    info = PngInfo()
+    info.add_text("unwanted", "metadata-to-strip")
+    output = io.BytesIO()
+    Image.new("RGBA", (64, 64)).save(output, format="PNG", pnginfo=info)
+    response = client.put(
+        "/api/v1/me/profile/skin",
+        headers=headers,
+        files={"image": ("skin.png", output.getvalue(), "image/png")},
+        data={"model": "slim"},
+    )
+    downloaded = client.get("/textures/" + response.json()["hash"])
+    with Image.open(io.BytesIO(downloaded.content)) as image:
+        assert "unwanted" not in image.info
+    profile_id = client.get("/api/v1/me", headers=headers).json()["profile"]["uuid"]
+    prop = client.get(
+        "/api/yggdrasil/sessionserver/session/minecraft/profile/" + profile_id, params={"unsigned": "false"}
+    ).json()["properties"][0]
+    textures = json.loads(base64.b64decode(prop["value"]))["textures"]
+    assert textures["SKIN"]["metadata"]["model"] == "slim"
+    assert textures["SKIN"]["url"].endswith(response.json()["hash"])
