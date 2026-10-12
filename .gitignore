@@ -18,3 +18,5 @@ uploads/
 .vscode/
 desktop.ini
 Thumbs.db
+data/
+.ruff_cache/

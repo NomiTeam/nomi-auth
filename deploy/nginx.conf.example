@@ -1,0 +1,17 @@
+# Include inside the http block. Supply your own TLS certificate and domain.
+server {
+    listen 443 ssl;
+    server_name auth.example.com;
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    client_max_body_size 2m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        # Do not enable proxy-header trust without restricting allowed proxies.
+    }
+    # Same-host bot calls 127.0.0.1:8000 directly. Remote bots require an explicit
+    # allowlist or a private network route in addition to the API bearer token.
+    location /internal/ { deny all; }
+}

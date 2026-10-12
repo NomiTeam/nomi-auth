@@ -1,0 +1,22 @@
+[project]
+name = "nomi-auth"
+version = "0.1.0"
+description = "Nomi SQLite account and Yggdrasil service"
+requires-python = ">=3.12,<3.14"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "pydantic-settings>=2.6,<3", "argon2-cffi>=23,<26", "cryptography>=44", "pillow>=11", "python-multipart>=0.0.20"]
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.28", "ruff>=0.11"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+extend-ignore = ["B008"]

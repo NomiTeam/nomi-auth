@@ -1,0 +1,19 @@
+[Unit]
+Description=Nomi account and Yggdrasil service
+After=network.target
+
+[Service]
+User=nomi
+Group=nomi
+WorkingDirectory=/opt/nomi-auth
+EnvironmentFile=/etc/nomi-auth/service.env
+ExecStart=/opt/nomi-auth/.venv/bin/uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nomi-auth
+
+[Install]
+WantedBy=multi-user.target
