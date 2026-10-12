@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -46,6 +47,14 @@ class Redemption(BaseModel):
 class Rename(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[A-Za-z0-9_]{3,16}$")
+
+
+class MemberOperation(BaseModel):
+    bot_app_id: str = Field(min_length=1, max_length=128)
+    group_openid: str = Field(min_length=1, max_length=128)
+    member_openid: str = Field(min_length=1, max_length=128)
+    event_id: str = Field(min_length=1, max_length=256)
+    name: str = Field(max_length=64)
 
 
 class GameRequest(BaseModel):
@@ -317,16 +326,16 @@ def create_app(settings: Settings | None = None):
             row = login_record(conn, request_id, authorization)
         status = (
             "EXPIRED"
-            if row["status"] in ("PENDING", "VERIFIED") and row["expires_at"] <= now()
+            if row["status"] in ("PENDING", "AWAITING_NAME", "VERIFIED") and row["expires_at"] <= now()
             else row["status"]
         )
-        return {"status": status, "expires_at": row["expires_at"]}
+        return {"status": status, "expires_at": row["expires_at"], "error": row["error"]}
 
     @app.delete("/api/v1/logins/{request_id}")
     def login_cancel(request_id: str, authorization: str | None = Header(None)):
         with db.write() as conn:
             row = login_record(conn, request_id, authorization)
-            if row["status"] not in ("PENDING", "VERIFIED"):
+            if row["status"] not in ("PENDING", "AWAITING_NAME", "VERIFIED"):
                 raise Problem("ALREADY_FINISHED", "申请已结束", 409)
             conn.execute("UPDATE login_requests SET status='CANCELLED' WHERE id=?", (request_id,))
         return {"status": "CANCELLED"}
@@ -349,6 +358,13 @@ def create_app(settings: Settings | None = None):
             ).fetchone()
             if not row or row["expires_at"] <= now():
                 raise Problem("INVALID_CODE", "登录验证码无效或过期")
+            same_member = (row["app_id"], row["group_id"], row["member_id"]) == (
+                body.bot_app_id,
+                body.group_openid,
+                body.member_openid,
+            )
+            if row["status"] == "AWAITING_NAME" and same_member:
+                return {"status": "AWAITING_NAME"}
             if row["status"] != "PENDING":
                 raise Problem("CODE_USED", "登录验证码已使用或申请已结束", 409)
             identity = conn.execute(
@@ -357,19 +373,109 @@ def create_app(settings: Settings | None = None):
                 (body.bot_app_id, body.group_openid, body.member_openid),
             ).fetchone()
             if not identity:
-                raise Problem("ACCOUNT_NOT_FOUND", "你在这个群内还没有账号，请先注册", 404)
-            if identity["status"] != "active":
+                pending = conn.execute(
+                    """SELECT 1 FROM login_requests WHERE app_id=? AND group_id=? AND member_id=?
+                    AND status='AWAITING_NAME' AND expires_at>?""",
+                    (body.bot_app_id, body.group_openid, body.member_openid, now()),
+                ).fetchone()
+                if pending:
+                    raise Problem("REQUEST_IN_PROGRESS", "你已有待注册申请，请先完成或关闭它", 409)
+                conn.execute(
+                    """UPDATE login_requests SET status='AWAITING_NAME',app_id=?,group_id=?,member_id=?
+                    WHERE id=?""",
+                    (body.bot_app_id, body.group_openid, body.member_openid, row["id"]),
+                )
+                result = {"status": "AWAITING_NAME"}
+            elif identity["status"] != "active":
                 raise Problem("ACCOUNT_UNAVAILABLE", "账号已停用", 403)
-            conn.execute(
-                "UPDATE login_requests SET status='VERIFIED',account_id=? WHERE id=?",
-                (identity["id"], row["id"]),
-            )
-            result = {"status": "VERIFIED"}
+            else:
+                conn.execute(
+                    "UPDATE login_requests SET status='VERIFIED',account_id=? WHERE id=?",
+                    (identity["id"], row["id"]),
+                )
+                profile = conn.execute(
+                    "SELECT name,uuid FROM profiles WHERE account_id=?", (identity["id"],)
+                ).fetchone()
+                result = {"status": "VERIFIED", "name": profile["name"], "uuid": profile["uuid"]}
+                audit(conn, "qq_login_verified", identity["id"])
             conn.execute(
                 "INSERT INTO receipts VALUES(?,?,'login',?,?)",
                 (body.bot_app_id, body.event_id, payload_hash, json.dumps(result)),
             )
-            audit(conn, "qq_login_verified", identity["id"])
+        return result
+
+    def member_receipt(conn, body, operation):
+        receipt = conn.execute(
+            "SELECT * FROM receipts WHERE app_id=? AND event_id=? AND operation=?",
+            (body.bot_app_id, body.event_id, operation),
+        ).fetchone()
+        if receipt:
+            if receipt["payload_hash"] != digest(body.model_dump_json()):
+                raise Problem("EVENT_CONFLICT", "事件参数与原请求不一致", 409)
+            return json.loads(receipt["result"])
+        return None
+
+    def save_member_receipt(conn, body, operation, result):
+        conn.execute(
+            "INSERT INTO receipts VALUES(?,?,?,?,?)",
+            (body.bot_app_id, body.event_id, operation, digest(body.model_dump_json()), json.dumps(result)),
+        )
+
+    @app.post("/internal/v1/logins/register")
+    def register_claimed_login(body: MemberOperation, authorization: str | None = Header(None)):
+        bot_auth(authorization, body)
+        with db.write() as conn:
+            cached = member_receipt(conn, body, "login_register")
+            if cached is not None:
+                return cached
+            row = conn.execute(
+                """SELECT * FROM login_requests WHERE app_id=? AND group_id=? AND member_id=?
+                AND status='AWAITING_NAME' ORDER BY expires_at DESC LIMIT 1""",
+                (body.bot_app_id, body.group_openid, body.member_openid),
+            ).fetchone()
+            if not row:
+                raise Problem("NO_PENDING_REGISTRATION", "没有待注册申请，请先发送启动器的登录码", 409)
+            error = None
+            if row["expires_at"] <= now():
+                error = "REQUEST_EXPIRED"
+            elif not re.fullmatch(r"[A-Za-z0-9_]{3,16}", body.name):
+                error = "INVALID_NAME"
+            elif conn.execute(
+                "SELECT 1 FROM identities WHERE app_id=? AND group_id=? AND member_id=?",
+                (body.bot_app_id, body.group_openid, body.member_openid),
+            ).fetchone():
+                error = "IDENTITY_ALREADY_BOUND"
+            elif conn.execute(
+                "SELECT 1 FROM accounts WHERE login_normalized=? UNION ALL SELECT 1 FROM profiles WHERE name_normalized=?",
+                (body.name.lower(), body.name.lower()),
+            ).fetchone():
+                error = "NAME_TAKEN"
+            if error:
+                conn.execute(
+                    "UPDATE login_requests SET status='FAILED',error=? WHERE id=?", (error, row["id"])
+                )
+                result = {"status": "FAILED", "code": error}
+            else:
+                account_id, profile_id = uuid.uuid4().hex, uuid.uuid4().hex
+                conn.execute(
+                    "INSERT INTO accounts(id,login_name,login_normalized,created_at) VALUES(?,?,?,?)",
+                    (account_id, body.name, body.name.lower(), now()),
+                )
+                conn.execute(
+                    "INSERT INTO profiles(uuid,account_id,name,name_normalized) VALUES(?,?,?,?)",
+                    (profile_id, account_id, body.name, body.name.lower()),
+                )
+                conn.execute(
+                    "INSERT INTO identities VALUES(?,?,?,?)",
+                    (account_id, body.bot_app_id, body.group_openid, body.member_openid),
+                )
+                conn.execute(
+                    "UPDATE login_requests SET status='VERIFIED',account_id=? WHERE id=?",
+                    (account_id, row["id"]),
+                )
+                audit(conn, "qq_register", account_id)
+                result = {"status": "REGISTERED", "name": body.name, "uuid": profile_id}
+            save_member_receipt(conn, body, "login_register", result)
         return result
 
     def exchange_session(conn, row, table, required_status):
@@ -434,20 +540,51 @@ def create_app(settings: Settings | None = None):
     def rename(body: Rename, authorization: str | None = Header(None)):
         with db.write() as conn:
             account = account_for_token(conn, bearer(authorization), "management")
-            profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
-            if profile["last_renamed_at"] and profile["last_renamed_at"] + cfg.rename_cooldown > now():
-                raise Problem("RENAME_COOLDOWN", "尚在改名冷却期", 409)
-            if conn.execute(
-                "SELECT 1 FROM profiles WHERE name_normalized=? AND uuid<>?",
-                (body.name.lower(), profile["uuid"]),
-            ).fetchone():
-                raise Problem("NAME_TAKEN", "游戏名已被使用", 409)
-            conn.execute(
-                "UPDATE profiles SET name=?,name_normalized=?,last_renamed_at=? WHERE uuid=?",
-                (body.name, body.name.lower(), now(), profile["uuid"]),
-            )
-            audit(conn, "rename", account["id"], json.dumps({"old": profile["name"], "new": body.name}))
-        return {"uuid": profile["uuid"], "name": body.name}
+            return rename_profile(conn, account["id"], body.name)
+
+    def rename_profile(conn, account_id, name):
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", name):
+            raise Problem("INVALID_NAME", "名称须为 3 至 16 位字母、数字或下划线")
+        profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account_id,)).fetchone()
+        if conn.execute(
+            "SELECT 1 FROM profiles WHERE name_normalized=? AND uuid<>?", (name.lower(), profile["uuid"])
+        ).fetchone():
+            raise Problem("NAME_TAKEN", "游戏名已被使用", 409)
+        if profile["name"] == name:
+            return {"uuid": profile["uuid"], "name": name}
+        if profile["last_renamed_at"] and profile["last_renamed_at"] + cfg.rename_cooldown > now():
+            raise Problem("RENAME_COOLDOWN", "尚在改名冷却期", 409)
+        # UUID is assigned only at registration. Renaming never replaces a profile.
+        conn.execute(
+            "UPDATE profiles SET name=?,name_normalized=?,last_renamed_at=? WHERE uuid=?",
+            (name, name.lower(), now(), profile["uuid"]),
+        )
+        audit(conn, "rename", account_id, json.dumps({"old": profile["name"], "new": name}))
+        return {"uuid": profile["uuid"], "name": name}
+
+    @app.post("/internal/v1/profiles/rename")
+    def rename_member(body: MemberOperation, authorization: str | None = Header(None)):
+        bot_auth(authorization, body)
+        with db.write() as conn:
+            cached = member_receipt(conn, body, "rename")
+            if cached is not None:
+                return cached
+            account = conn.execute(
+                """SELECT a.* FROM identities i JOIN accounts a ON a.id=i.account_id
+                WHERE i.app_id=? AND i.group_id=? AND i.member_id=?""",
+                (body.bot_app_id, body.group_openid, body.member_openid),
+            ).fetchone()
+            try:
+                if not account:
+                    raise Problem("ACCOUNT_NOT_FOUND", "尚未注册账号", 404)
+                if account["status"] != "active":
+                    raise Problem("ACCOUNT_UNAVAILABLE", "账号已停用", 403)
+                result = {"status": "RENAMED", **rename_profile(conn, account["id"], body.name)}
+            except Problem as error:
+                # End this operation and remember failures so replay cannot later rename it.
+                result = {"status": "FAILED", "code": error.code}
+            save_member_receipt(conn, body, "rename", result)
+        return result
 
     texture_dir = cfg.data_dir / "textures"
     texture_dir.mkdir(exist_ok=True)

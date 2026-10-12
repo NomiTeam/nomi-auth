@@ -128,7 +128,7 @@ def test_reinstall_login_requires_bound_identity(client):
     create_account(client)
     request = client.post("/api/v1/logins", json={}).json()
     assert exchange(client, request, "login").status_code == 403
-    assert verify(client, request, member="impostor", event="wrong", operation="login").status_code == 404
+    assert verify(client, request, event="wrong", group="other", operation="login").status_code == 400
     assert verify(client, request, event="good", operation="login").status_code == 200
     assert verify(client, request, event="good", operation="login").status_code == 200
     assert verify(client, request, event="another", operation="login").status_code == 409
@@ -166,7 +166,10 @@ def test_unknown_name_generic_response_and_disabled_account(client):
     create_account(client)
     unknown = client.post("/api/v1/logins", json={})
     assert unknown.status_code == 201
-    assert verify(client, unknown.json(), member="unregistered", operation="login").status_code == 404
+    assert (
+        verify(client, unknown.json(), member="unregistered", operation="login").json()["status"]
+        == "AWAITING_NAME"
+    )
     request = client.post("/api/v1/logins", json={}).json()
     assert verify(client, request, operation="login", event="ok").status_code == 200
     with client.app.state.db.write() as conn:
@@ -309,10 +312,6 @@ def test_login_without_name_resolves_sending_members_account(client):
     create_account(client, "Alice", member="alice", event="register-alice")
     create_account(client, "Bob", member="bob", event="register-bob")
     request = client.post("/api/v1/logins").json()
-    assert (
-        verify(client, request, member="new", event="new-member", operation="login").json()["code"]
-        == "ACCOUNT_NOT_FOUND"
-    )
     assert verify(client, request, member="bob", event="bob-login", operation="login").status_code == 200
     assert exchange(client, request, "login").json()["login_name"] == "Bob"
 
@@ -346,4 +345,115 @@ def test_hmcl_native_skin_upload_model_and_ownership(client):
             files={"file": ("skin.png", output.getvalue(), "image/png")},
         ).status_code
         == 403
+    )
+
+
+def member_command(client, name, member="new", event="choose-name", operation="register"):
+    return client.post(
+        "/internal/v1/logins/register" if operation == "register" else "/internal/v1/profiles/rename",
+        headers={"Authorization": "Bearer " + "x" * 32},
+        json={
+            "name": name,
+            "bot_app_id": "app",
+            "group_openid": "group",
+            "member_openid": member,
+            "event_id": event,
+        },
+    )
+
+
+def test_unified_login_claim_register_and_restart(client):
+    request = client.post("/api/v1/logins").json()
+    assert verify(client, request, member="new", operation="login").json()["status"] == "AWAITING_NAME"
+    assert verify(client, request, member="other", event="steal", operation="login").status_code == 409
+    assert member_command(client, "Stolen", member="other").status_code == 409
+    assert exchange(client, request, "login").status_code == 403
+    restarted = TestClient(create_app(client.app.state.settings))
+    result = member_command(restarted, "NewPlayer").json()
+    assert result["status"] == "REGISTERED" and result["name"] == "NewPlayer"
+    assert member_command(restarted, "NewPlayer").json() == result
+    session = exchange(restarted, request, "login").json()
+    assert session["game"]["selectedProfile"]["id"] == result["uuid"]
+    second = restarted.post("/api/v1/logins").json()
+    assert verify(restarted, second, member="new", event="second", operation="login").json() == {
+        "status": "VERIFIED",
+        "name": "NewPlayer",
+        "uuid": result["uuid"],
+    }
+
+
+def test_unified_registration_conflict_closes_request(client):
+    create_account(client)
+    request = client.post("/api/v1/logins").json()
+    verify(client, request, member="new", operation="login")
+    result = member_command(client, "alice").json()
+    assert result == {"status": "FAILED", "code": "NAME_TAKEN"}
+    assert (
+        client.get("/api/v1/logins/" + request["request_id"], headers=private(request)).json()["status"]
+        == "FAILED"
+    )
+    assert member_command(client, "Available", event="again").status_code == 409
+    assert exchange(client, request, "login").status_code == 403
+
+
+def test_pending_member_only_one_request_expiry_and_cancellation(client):
+    first = client.post("/api/v1/logins").json()
+    verify(client, first, member="new", operation="login")
+    second = client.post("/api/v1/logins").json()
+    assert (
+        verify(client, second, member="new", event="second", operation="login").json()["code"]
+        == "REQUEST_IN_PROGRESS"
+    )
+    assert client.delete("/api/v1/logins/" + first["request_id"], headers=private(first)).status_code == 200
+    assert member_command(client, "AfterClose").status_code == 409
+    verify(client, second, member="new", event="retry", operation="login")
+    with client.app.state.db.write() as conn:
+        conn.execute("UPDATE login_requests SET expires_at=0 WHERE id=?", (second["request_id"],))
+    assert member_command(client, "TooLate", event="late").json()["code"] == "REQUEST_EXPIRED"
+
+
+def test_register_cancel_race_in_unified_flow(client):
+    request = client.post("/api/v1/logins").json()
+    verify(client, request, member="new", operation="login")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cancel = executor.submit(
+            client.delete, "/api/v1/logins/" + request["request_id"], headers=private(request)
+        )
+        register = executor.submit(member_command, client, "RacePlayer")
+        responses = [cancel.result(), register.result()]
+    # A cancellation may also invalidate the verified but unclaimed session.
+    with client.app.state.db.read() as conn:
+        state = conn.execute(
+            "SELECT status FROM login_requests WHERE id=?", (request["request_id"],)
+        ).fetchone()[0]
+    assert state == "CANCELLED"
+    assert all(r.status_code in (200, 409) for r in responses)
+    assert exchange(client, request, "login").status_code == 403
+
+
+def test_bot_rename_preserves_uuid_and_ends_conflict(client):
+    create_account(client, "Alice", event="alice")
+    create_account(client, "Bob", member="bob", event="bob")
+    before = login(client)["game"]["selectedProfile"]["id"]
+    renamed = member_command(client, "NewAlice", member="member", event="rename", operation="rename").json()
+    assert renamed == {"status": "RENAMED", "name": "NewAlice", "uuid": before}
+    assert (
+        member_command(client, "NewAlice", member="member", event="rename", operation="rename").json()
+        == renamed
+    )
+    conflict = member_command(client, "bOB", member="member", event="conflict", operation="rename").json()
+    assert conflict == {"status": "FAILED", "code": "NAME_TAKEN"}
+    assert (
+        member_command(client, "Another", member="member", event="cooldown", operation="rename").json()[
+            "code"
+        ]
+        == "RENAME_COOLDOWN"
+    )
+    after = login(client, event="after-rename")["game"]["selectedProfile"]
+    assert after == {"id": before, "name": "NewAlice"}
+    assert (
+        member_command(client, "Unknown", member="unknown", event="unknown", operation="rename").json()[
+            "code"
+        ]
+        == "ACCOUNT_NOT_FOUND"
     )

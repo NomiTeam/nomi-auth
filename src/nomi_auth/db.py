@@ -49,7 +49,7 @@ class Database:
         # v2 removes password storage while preserving accounts, identities and UUIDs.
         with self.write() as conn:
             versions = [r[0] for r in conn.execute("SELECT version FROM schema_versions")]
-            if versions and max(versions) > 2:
+            if versions and max(versions) > 3:
                 raise RuntimeError("Database schema is newer than this application")
             for table in ("accounts", "registrations"):
                 columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -65,6 +65,12 @@ class Database:
                 conn.execute("DELETE FROM tokens")
                 conn.execute("DELETE FROM joins")
             conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(2)")
+            # A claimed login may wait for a name supplied by the same group member.
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(login_requests)")}
+            for column in ("app_id", "group_id", "member_id", "error"):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE login_requests ADD COLUMN {column} TEXT")
+            conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(3)")
 
     def connect(self):
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
