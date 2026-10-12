@@ -502,3 +502,53 @@ def test_multiple_renames_keep_uuid_and_failed_replay_stays_failed(client):
         == failed
     )
     assert login(client, event="after-replay")["game"]["selectedProfile"] == {"id": original, "name": "ALICE"}
+
+
+def test_launcher_rename_returns_updated_session_and_preserves_uuid(client):
+    create_account(client)
+    session = login(client)
+    game = session["game"]
+    profile_id = game["selectedProfile"]["id"]
+    headers = {"Authorization": "Bearer " + game["accessToken"]}
+    result = client.patch(
+        "/api/v1/game/profiles/" + profile_id + "/name", headers=headers, json={"name": "NewAlice"}
+    )
+    assert result.status_code == 200
+    updated = result.json()
+    assert updated["game"]["selectedProfile"] == {"id": profile_id, "name": "NewAlice"}
+    assert updated["game"]["accessToken"] == game["accessToken"]
+    assert client.post("/api/yggdrasil/authserver/validate", json=game).status_code == 204
+    assert (
+        client.patch(
+            "/api/v1/game/profiles/" + "0" * 32 + "/name", headers=headers, json={"name": "Other"}
+        ).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            "/api/v1/game/profiles/" + profile_id + "/name",
+            headers={"Authorization": "Bearer " + session["management_token"]},
+            json={"name": "WrongScope"},
+        ).status_code
+        == 403
+    )
+    assert (
+        member_command(
+            client, "Another", member="member", event="bot-after-launcher", operation="rename"
+        ).json()["code"]
+        == "RENAME_COOLDOWN"
+    )
+
+
+def test_launcher_rename_conflict_does_not_change_profile(client):
+    create_account(client, "Alice", event="alice")
+    create_account(client, "Bob", member="bob", event="bob")
+    game = login(client)["game"]
+    profile_id = game["selectedProfile"]["id"]
+    result = client.patch(
+        "/api/v1/game/profiles/" + profile_id + "/name",
+        headers={"Authorization": "Bearer " + game["accessToken"]},
+        json={"name": "bOB"},
+    )
+    assert result.status_code == 409 and result.json()["code"] == "NAME_TAKEN"
+    assert login(client, event="still-alice")["game"]["selectedProfile"] == game["selectedProfile"]

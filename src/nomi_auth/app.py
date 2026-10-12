@@ -562,6 +562,29 @@ def create_app(settings: Settings | None = None):
         audit(conn, "rename", account_id, json.dumps({"old": profile["name"], "new": name}))
         return {"uuid": profile["uuid"], "name": name}
 
+    @app.patch("/api/v1/game/profiles/{profile_id}/name")
+    def rename_game_profile(profile_id: str, body: Rename, authorization: str | None = Header(None)):
+        token = bearer(authorization)
+        with db.write() as conn:
+            account = account_for_token(conn, token, "game")
+            profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
+            if profile["uuid"] != profile_id.replace("-", ""):
+                raise Problem("PROFILE_MISMATCH", "只能修改自己的角色", 403)
+            rename_profile(conn, account["id"], body.name)
+            client_token = conn.execute(
+                "SELECT client_token FROM tokens WHERE hash=?", (digest(token),)
+            ).fetchone()[0]
+            selected = {"id": profile["uuid"], "name": body.name}
+            return {
+                "login_name": account["login_name"],
+                "game": {
+                    "accessToken": token,
+                    "clientToken": client_token,
+                    "selectedProfile": selected,
+                    "availableProfiles": [selected],
+                },
+            }
+
     @app.post("/internal/v1/profiles/rename")
     def rename_member(body: MemberOperation, authorization: str | None = Header(None)):
         bot_auth(authorization, body)
