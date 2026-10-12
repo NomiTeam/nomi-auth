@@ -43,3 +43,5 @@ uv run python -m nomi_auth.cli enable Alice
 ## HMCL 原生皮肤上传
 
 角色资料提供 `uploadableTextures=skin`。`PUT /api/yggdrasil/api/user/profile/{uuid}/skin` 使用游戏 Bearer 令牌、multipart `file` 与 `model`；空模型表示 default，slim 表示细手臂，成功返回 204。只允许修改令牌所属角色。
+
+启动器账户按钮使用 `PATCH /api/v1/game/profiles/{uuid}/name`，以游戏 Bearer 令牌限定本人角色；返回更新后的游戏会话资料，UUID 与令牌保持不变。与群内改名共用名称唯一性及冷却规则。
