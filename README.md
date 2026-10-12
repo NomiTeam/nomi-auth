@@ -40,7 +40,7 @@ uv run python -m nomi_auth.cli enable Alice
 
 `deploy/` 提供 systemd、环境配置和 Nginx 示例，无需 Docker。当前服务器统一放在 `/home/naipu/minecraft/nomi-auth`：源码、`.venv/`、`.env`、`data/` 都在应用目录下，归 `www-data:www-data` 所有。`.env` 权限 0600、data 目录 0700。服务 `nomi-auth.service` 开机自启并在失败时重启，后端仅监听 127.0.0.1:8000。
 
-公网域名为 `auth.missdrop.cn`，EdgeOne 以 HTTPS 回源 `https.missdrop.cn:20080`，回源 SNI 为 https.missdrop.cn，Host 为 auth.missdrop.cn。Nginx 复用 https.missdrop.cn 证书，并禁止公网访问 /internal/。EdgeOne/DNS 需在对应控制台配置。
+公网域名为 `auth.missdrop.cn`，EdgeOne 以 HTTPS 回源 `https.missdrop.cn:20080`，回源 SNI 为 https.missdrop.cn，Host 为 auth.missdrop.cn。Nginx 复用 https.missdrop.cn 证书，并禁止公网访问 /internal/。EdgeOne/DNS 已配置完成。公网 HTTPS 健康检查、认证元数据、签名角色查询、登录申请与取消均已验证通过；真实 authlib-injector 1.2.8 经公网地址初始化正常。
 
 机器人位于 `/home/naipu/minecraft/nomi-bot`，归 mcadmin 所有，由 bot.service 管理，通过回环地址调用后端内部接口。使用 uv 安装到不同用户的虚拟环境时设置 `--link-mode copy`，避免硬链接的所有权相互影响。
 
