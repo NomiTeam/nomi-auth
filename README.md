@@ -32,4 +32,8 @@ uv run python -m nomi_auth.cli enable Alice
 
 备份命令只生成数据库快照，还需备份纹理与签名密钥。cleanup 应每日运行。停用会撤销会话，已在线玩家需由游戏服管理员踢出。`deploy/` 提供 systemd 和可选 Nginx 示例，无需 Docker。
 
+直接部署时创建 `nomi` 服务用户，将应用与虚拟环境放到 `/opt/nomi-auth`，创建归该用户所有的 `/var/lib/nomi-auth`。复制 `deploy/service.env.example` 到 `/etc/nomi-auth/service.env` 并填写真实值，配置文件权限设为 `0600`。复制 service 文件到 systemd 后再启用服务。Nginx 示例中配置实际域名与证书；后端仅监听回环地址，信任来源只限回环代理。远程机器人应使用私网或单独允许的内部路由。
+
+工作区内首次开发配置可执行 `uv run python -m nomi_auth.setup_local --bot-dir ../nomi-bot`。命令不会覆盖既有 Nomi 配置；指定群未知时启用机器人本地查询模式并禁用注册。填写群 ID 后关闭查询模式，重启两个服务。
+
 当前使用标准库 sqlite3 和 schema 版本 1，后续结构变更需要显式迁移。已通过的 API 测试不能替代真实 QQ 群事件和 Minecraft 进服联调。
