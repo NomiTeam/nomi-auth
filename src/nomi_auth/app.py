@@ -33,7 +33,6 @@ class Registration(BaseModel):
 
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    username: str = Field(pattern=r"^[A-Za-z0-9_]{3,16}$")
 
 
 class Redemption(BaseModel):
@@ -284,22 +283,17 @@ def create_app(settings: Settings | None = None):
         return result
 
     @app.post("/api/v1/logins", status_code=201)
-    def login_start(body: LoginRequest):
+    def login_start(body: LoginRequest = LoginRequest()):
         request_id, verification, poll = uuid.uuid4().hex, code(), secret()
         expires = now() + cfg.registration_ttl
         with db.write() as conn:
-            account = conn.execute(
-                "SELECT id FROM accounts WHERE login_normalized=? AND status='active'",
-                (body.username.lower(),),
-            ).fetchone()
-            # Unknown and disabled names have the same public response as valid accounts.
             conn.execute(
                 "INSERT INTO login_requests(id,code_hash,poll_hash,account_id,expires_at) VALUES(?,?,?,?,?)",
                 (
                     request_id,
                     code_hash(verification),
                     digest(poll),
-                    account["id"] if account else None,
+                    None,
                     expires,
                 ),
             )
@@ -358,19 +352,24 @@ def create_app(settings: Settings | None = None):
             if row["status"] != "PENDING":
                 raise Problem("CODE_USED", "登录验证码已使用或申请已结束", 409)
             identity = conn.execute(
-                """SELECT 1 FROM identities i JOIN accounts a ON a.id=i.account_id
-                WHERE i.account_id=? AND i.app_id=? AND i.group_id=? AND i.member_id=? AND a.status='active'""",
-                (row["account_id"], body.bot_app_id, body.group_openid, body.member_openid),
+                """SELECT a.id,a.status FROM identities i JOIN accounts a ON a.id=i.account_id
+                WHERE i.app_id=? AND i.group_id=? AND i.member_id=?""",
+                (body.bot_app_id, body.group_openid, body.member_openid),
             ).fetchone()
             if not identity:
-                raise Problem("IDENTITY_MISMATCH", "必须使用该账号绑定的群成员身份登录", 403)
-            conn.execute("UPDATE login_requests SET status='VERIFIED' WHERE id=?", (row["id"],))
+                raise Problem("ACCOUNT_NOT_FOUND", "你在这个群内还没有账号，请先注册", 404)
+            if identity["status"] != "active":
+                raise Problem("ACCOUNT_UNAVAILABLE", "账号已停用", 403)
+            conn.execute(
+                "UPDATE login_requests SET status='VERIFIED',account_id=? WHERE id=?",
+                (identity["id"], row["id"]),
+            )
             result = {"status": "VERIFIED"}
             conn.execute(
                 "INSERT INTO receipts VALUES(?,?,'login',?,?)",
                 (body.bot_app_id, body.event_id, payload_hash, json.dumps(result)),
             )
-            audit(conn, "qq_login_verified", row["account_id"])
+            audit(conn, "qq_login_verified", identity["id"])
         return result
 
     def exchange_session(conn, row, table, required_status):
@@ -457,8 +456,23 @@ def create_app(settings: Settings | None = None):
     def upload_skin(
         authorization: str | None = Header(None), image: UploadFile = File(...), model: str = Form("default")
     ):
+        return perform_skin_upload(authorization, image, model, "management")
+
+    def perform_skin_upload(authorization, image, model, kind, expected_profile=None):
+        model = model or "default"
+
+        def checked_account(conn):
+            account = account_for_token(conn, bearer(authorization), kind)
+            if expected_profile is not None:
+                owned = conn.execute(
+                    "SELECT 1 FROM profiles WHERE uuid=? AND account_id=?", (expected_profile, account["id"])
+                ).fetchone()
+                if not owned:
+                    raise Problem("INVALID_PROFILE", "无法修改此角色的皮肤", 403)
+            return account
+
         with db.read() as conn:
-            account_for_token(conn, bearer(authorization), "management")
+            checked_account(conn)
         if model not in ("default", "slim"):
             raise Problem("INVALID_MODEL", "不支持的手臂模型")
         raw = image.file.read(1024 * 1024 + 1)
@@ -483,13 +497,27 @@ def create_app(settings: Settings | None = None):
             temporary.write_bytes(content)
             temporary.replace(target)
         with db.write() as conn:
-            account = account_for_token(conn, bearer(authorization), "management")
+            account = checked_account(conn)
             conn.execute(
                 "UPDATE profiles SET skin_hash=?,skin_model=? WHERE account_id=?",
                 (texture_hash, model, account["id"]),
             )
             audit(conn, "skin_upload", account["id"], texture_hash)
         return {"hash": texture_hash, "url": f"{cfg.public_url.rstrip('/')}/textures/{texture_hash}"}
+
+    @app.put("/api/yggdrasil/api/user/profile/{profile_id}/skin", status_code=204)
+    def hmcl_upload_skin(
+        profile_id: str,
+        authorization: str | None = Header(None),
+        skin_file: UploadFile = File(..., alias="file"),
+        model: str = Form(""),
+    ):
+        try:
+            normalized = uuid.UUID(profile_id).hex
+        except ValueError:
+            raise Problem("INVALID_PROFILE", "角色 UUID 无效", 400)
+        perform_skin_upload(authorization, skin_file, model, "game", normalized)
+        return Response(status_code=204)
 
     @app.delete("/api/v1/me/profile/skin", status_code=204)
     def clear_skin(authorization: str | None = Header(None)):
@@ -561,7 +589,7 @@ def install_yggdrasil(app, cfg, db, account_for_token, issue):
                 prop["signature"] = base64.b64encode(
                     key.sign(value.encode(), padding.PKCS1v15(), hashes.SHA1())
                 ).decode()
-            result["properties"] = [prop]
+            result["properties"] = [prop, {"name": "uploadableTextures", "value": "skin"}]
         return result
 
     def token_and_profile(conn, body):

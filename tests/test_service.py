@@ -58,7 +58,7 @@ def exchange(client, request, operation="register"):
 
 
 def login(client, name="Alice", member="member", event="login-event"):
-    request = client.post("/api/v1/logins", json={"username": name}).json()
+    request = client.post("/api/v1/logins", json={}).json()
     assert verify(client, request, member=member, event=event, operation="login").status_code == 200
     response = exchange(client, request, "login")
     assert response.status_code == 200, response.text
@@ -126,9 +126,9 @@ def test_cancel_races_with_registration(client):
 
 def test_reinstall_login_requires_bound_identity(client):
     create_account(client)
-    request = client.post("/api/v1/logins", json={"username": "Alice"}).json()
+    request = client.post("/api/v1/logins", json={}).json()
     assert exchange(client, request, "login").status_code == 403
-    assert verify(client, request, member="impostor", event="wrong", operation="login").status_code == 403
+    assert verify(client, request, member="impostor", event="wrong", operation="login").status_code == 404
     assert verify(client, request, event="good", operation="login").status_code == 200
     assert verify(client, request, event="good", operation="login").status_code == 200
     assert verify(client, request, event="another", operation="login").status_code == 409
@@ -150,12 +150,12 @@ def test_concurrent_exchange_only_issues_once(client):
 
 def test_expired_and_cancelled_login(client):
     create_account(client)
-    request = client.post("/api/v1/logins", json={"username": "Alice"}).json()
+    request = client.post("/api/v1/logins", json={}).json()
     assert (
         client.delete("/api/v1/logins/" + request["request_id"], headers=private(request)).status_code == 200
     )
     assert verify(client, request, operation="login").status_code == 409
-    other = client.post("/api/v1/logins", json={"username": "Alice"}).json()
+    other = client.post("/api/v1/logins", json={}).json()
     assert verify(client, other, operation="login", event="verified").status_code == 200
     with client.app.state.db.write() as conn:
         conn.execute("UPDATE login_requests SET expires_at=0 WHERE id=?", (other["request_id"],))
@@ -164,10 +164,10 @@ def test_expired_and_cancelled_login(client):
 
 def test_unknown_name_generic_response_and_disabled_account(client):
     create_account(client)
-    unknown = client.post("/api/v1/logins", json={"username": "Unknown"})
+    unknown = client.post("/api/v1/logins", json={})
     assert unknown.status_code == 201
-    assert verify(client, unknown.json(), operation="login").status_code == 403
-    request = client.post("/api/v1/logins", json={"username": "Alice"}).json()
+    assert verify(client, unknown.json(), member="unregistered", operation="login").status_code == 404
+    request = client.post("/api/v1/logins", json={}).json()
     assert verify(client, request, operation="login", event="ok").status_code == 200
     with client.app.state.db.write() as conn:
         conn.execute("UPDATE accounts SET status='disabled'")
@@ -274,7 +274,7 @@ def test_password_routes_removed_and_legacy_auth_disabled(client):
 
 def test_restart_keeps_verified_login_and_key(client):
     create_account(client)
-    request = client.post("/api/v1/logins", json={"username": "Alice"}).json()
+    request = client.post("/api/v1/logins", json={}).json()
     assert verify(client, request, operation="login").status_code == 200
     public = client.get("/api/yggdrasil").json()["signaturePublickey"]
     restarted = TestClient(create_app(client.app.state.settings))
@@ -303,3 +303,47 @@ def test_v1_migration_preserves_identity_and_uuid(tmp_path):
         create_app(Settings(data_dir=tmp_path, bot_token="x" * 32, bot_app_id="app", group_openid="group"))
     )
     assert login(migrated)["game"]["selectedProfile"]["id"] == "12345678901234567890123456789012"
+
+
+def test_login_without_name_resolves_sending_members_account(client):
+    create_account(client, "Alice", member="alice", event="register-alice")
+    create_account(client, "Bob", member="bob", event="register-bob")
+    request = client.post("/api/v1/logins").json()
+    assert (
+        verify(client, request, member="new", event="new-member", operation="login").json()["code"]
+        == "ACCOUNT_NOT_FOUND"
+    )
+    assert verify(client, request, member="bob", event="bob-login", operation="login").status_code == 200
+    assert exchange(client, request, "login").json()["login_name"] == "Bob"
+
+
+def test_hmcl_native_skin_upload_model_and_ownership(client):
+    create_account(client)
+    session = login(client)
+    headers = {"Authorization": "Bearer " + session["game"]["accessToken"]}
+    profile_id = session["game"]["selectedProfile"]["id"]
+    output = io.BytesIO()
+    Image.new("RGBA", (64, 64), "red").save(output, format="PNG")
+    for model, expected in (("slim", "slim"), ("", "default")):
+        response = client.put(
+            "/api/yggdrasil/api/user/profile/" + profile_id + "/skin",
+            headers=headers,
+            files={"file": ("skin.png", output.getvalue(), "image/png")},
+            data={"model": model},
+        )
+        assert response.status_code == 204 and not response.content
+        profile = client.get("/api/yggdrasil/sessionserver/session/minecraft/profile/" + profile_id).json()
+        props = {p["name"]: p["value"] for p in profile["properties"]}
+        assert props["uploadableTextures"] == "skin"
+        assert (
+            json.loads(base64.b64decode(props["textures"]))["textures"]["SKIN"]["metadata"]["model"]
+            == expected
+        )
+    assert (
+        client.put(
+            "/api/yggdrasil/api/user/profile/" + "0" * 32 + "/skin",
+            headers=headers,
+            files={"file": ("skin.png", output.getvalue(), "image/png")},
+        ).status_code
+        == 403
+    )
