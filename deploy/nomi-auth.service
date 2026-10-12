@@ -5,14 +5,14 @@ Wants=network-online.target
 [Service]
 User=www-data
 Group=www-data
-WorkingDirectory=/home/naipu/minecraft/nomi-auth
-ExecStart=/home/naipu/minecraft/nomi-auth/.venv/bin/uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+WorkingDirectory=/srv/nomi-auth
+ExecStart=/srv/nomi-auth/.venv/bin/uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
 RestartSec=5
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/home/naipu/minecraft/nomi-auth/data
+ReadWritePaths=/srv/nomi-auth/data
 PrivateTmp=true
 [Install]
 WantedBy=multi-user.target

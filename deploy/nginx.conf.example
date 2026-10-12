@@ -1,9 +1,9 @@
 server {
-    listen 20080 ssl;
-    listen [::]:20080 ssl;
-    server_name auth.missdrop.cn https.missdrop.cn;
-    ssl_certificate /etc/letsencrypt/live/https.missdrop.cn/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/https.missdrop.cn/privkey.pem;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name auth.example.com;
+    ssl_certificate /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     client_max_body_size 2m;
     location /internal/ { deny all; }
