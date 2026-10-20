@@ -749,3 +749,22 @@ def test_authenticated_profile_syncs_bot_rename_without_changing_uuid(client):
     after = client.get("/api/v1/game/profile", headers=headers).json()
     assert after == {"id": before["id"], "name": "RenamedAlice"}
     assert client.get("/api/v1/game/profile", headers=refresh_headers(session)).status_code == 403
+
+
+def test_schema_four_upgrade_keeps_existing_accounts_and_sessions(client):
+    from nomi_auth.db import Database
+
+    create_account(client)
+    session = login(client)
+    with client.app.state.db.write() as conn:
+        conn.execute("DROP TABLE login_retries")
+        conn.execute("DROP TABLE refresh_retries")
+        conn.execute("DELETE FROM schema_versions WHERE version=5")
+    upgraded = Database(client.app.state.db.path)
+    with upgraded.read() as conn:
+        assert conn.execute("SELECT max(version) FROM schema_versions").fetchone()[0] == 5
+        assert (
+            conn.execute("SELECT uuid FROM profiles").fetchone()[0]
+            == session["game"]["selectedProfile"]["id"]
+        )
+    assert client.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 204
