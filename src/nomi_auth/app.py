@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hmac
 import io
 import json
 import logging
@@ -178,8 +179,8 @@ def create_app(settings: Settings | None = None):
             raise Problem("INVALID_TOKEN", "令牌无效或已过期", 403)
         return row
 
-    def issue(conn, account_id, kind, client_token=None):
-        token = secret()
+    def issue(conn, account_id, kind, client_token=None, token=None):
+        token = token or secret()
         ttl = {
             "game": cfg.game_token_ttl,
             "refresh": cfg.refresh_token_ttl,
@@ -520,7 +521,7 @@ def create_app(settings: Settings | None = None):
             save_member_receipt(conn, body, "login_register", result)
         return result
 
-    def exchange_session(conn, row, table, required_status):
+    def exchange_session(conn, row, table, required_status, retry_key=None, poll=None):
         if row["status"] != required_status:
             raise Problem("NOT_VERIFIED", "申请尚未验证或已经结束", 403)
         if row["expires_at"] <= now():
@@ -532,55 +533,126 @@ def create_app(settings: Settings | None = None):
         ).fetchone()
         if not account:
             raise Problem("ACCOUNT_UNAVAILABLE", "账号不可用", 403)
-        profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
         client_token = secret()
-        game_token = issue(conn, account["id"], "game", client_token)
-        management_token = issue(conn, account["id"], "management")
-        refresh_token = issue(conn, account["id"], "refresh", client_token)
+        nonce = secret()
+
+        def value(kind):
+            return (
+                hmac.digest(poll.encode(), f"{retry_key}:{nonce}:{kind}".encode(), "sha256").hex()
+                if retry_key
+                else None
+            )
+
+        game_token = issue(conn, account["id"], "game", client_token, value("game"))
+        management_token = issue(conn, account["id"], "management", token=value("management"))
+        refresh_token = issue(conn, account["id"], "refresh", client_token, value("refresh"))
+        if retry_key:
+            conn.execute(
+                "INSERT INTO login_retries VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    row["id"],
+                    digest(poll),
+                    digest(retry_key),
+                    nonce,
+                    digest(game_token),
+                    digest(refresh_token),
+                    digest(management_token),
+                    now() + 120,
+                ),
+            )
         conn.execute(f"DELETE FROM {table} WHERE id=?", (row["id"],))
-        selected = {"id": profile["uuid"], "name": profile["name"]}
         audit(conn, "qq_session_issued", account["id"])
-        return {
-            "login_name": account["login_name"],
-            "management_token": management_token,
-            "refresh_token": refresh_token,
-            "refresh_expires_at": now() + cfg.refresh_token_ttl,
-            "game_expires_at": now() + cfg.game_token_ttl,
-            "game": {
-                "accessToken": game_token,
-                "clientToken": client_token,
-                "selectedProfile": selected,
-                "availableProfiles": [selected],
-            },
-        }
+        result = launcher_refresh_result(conn, account, client_token, game_token, refresh_token)
+        result["management_token"] = management_token
+        return result
+
+    @app.get("/api/v1/game/profile")
+    def current_game_profile(authorization: str | None = Header(None)):
+        with db.read() as conn:
+            account = account_for_token(conn, bearer(authorization), "game")
+            profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
+            return {"id": profile["uuid"], "name": profile["name"]}
 
     @app.post("/api/v1/sessions/refresh")
-    def refresh_launcher_session(authorization: str | None = Header(None)):
+    def refresh_launcher_session(
+        authorization: str | None = Header(None), x_request_id: str | None = Header(None)
+    ):
         token = bearer(authorization)
+        if x_request_id is not None and not re.fullmatch(r"[a-f0-9]{64}", x_request_id):
+            raise Problem("INVALID_REQUEST", "无效的续期请求标识", 422)
+
+        def derived(nonce, kind):
+            # Reconstruct the exact response using the caller's secret; never store plaintext tokens.
+            return hmac.digest(token.encode(), f"{x_request_id}:{nonce}:{kind}".encode(), "sha256").hex()
+
         with db.write() as conn:
+            retry = conn.execute(
+                "SELECT * FROM refresh_retries WHERE old_hash=? AND expires_at>?",
+                (digest(token), now()),
+            ).fetchone()
+            if retry and x_request_id and secrets.compare_digest(retry["request_hash"], digest(x_request_id)):
+                account = account_for_token(conn, derived(retry["nonce"], "refresh"), "refresh")
+                stored = conn.execute(
+                    "SELECT * FROM tokens WHERE hash=?", (retry["refresh_hash"],)
+                ).fetchone()
+                access = derived(retry["nonce"], "game")
+                refresh = derived(retry["nonce"], "refresh")
+                return launcher_refresh_result(conn, account, stored["client_token"], access, refresh)
             account = account_for_token(conn, token, "refresh")
             stored = conn.execute("SELECT * FROM tokens WHERE hash=?", (digest(token),)).fetchone()
-            profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
             # Atomic single-use rotation. Other devices have independent client tokens.
             conn.execute(
                 "DELETE FROM tokens WHERE hash=? OR (account_id=? AND kind='game' AND client_token=?)",
                 (digest(token), account["id"], stored["client_token"]),
             )
-            access = issue(conn, account["id"], "game", stored["client_token"])
-            refresh = issue(conn, account["id"], "refresh", stored["client_token"])
-            selected = {"id": profile["uuid"], "name": profile["name"]}
-            return {
-                "login_name": account["login_name"],
-                "refresh_token": refresh,
-                "refresh_expires_at": now() + cfg.refresh_token_ttl,
-                "game_expires_at": now() + cfg.game_token_ttl,
-                "game": {
-                    "accessToken": access,
-                    "clientToken": stored["client_token"],
-                    "selectedProfile": selected,
-                    "availableProfiles": [selected],
-                },
-            }
+            if x_request_id:
+                nonce = secret()
+                access, refresh = derived(nonce, "game"), derived(nonce, "refresh")
+                for value, kind, ttl in (
+                    (access, "game", cfg.game_token_ttl),
+                    (refresh, "refresh", cfg.refresh_token_ttl),
+                ):
+                    conn.execute(
+                        "INSERT INTO tokens VALUES(?,?,?,?,?)",
+                        (digest(value), account["id"], kind, stored["client_token"], now() + ttl),
+                    )
+                conn.execute(
+                    "INSERT INTO refresh_retries VALUES(?,?,?,?,?,?)",
+                    (
+                        digest(token),
+                        digest(x_request_id),
+                        nonce,
+                        digest(access),
+                        digest(refresh),
+                        now() + 120,
+                    ),
+                )
+            else:
+                access = issue(conn, account["id"], "game", stored["client_token"])
+                refresh = issue(conn, account["id"], "refresh", stored["client_token"])
+            return launcher_refresh_result(conn, account, stored["client_token"], access, refresh)
+
+    def launcher_refresh_result(conn, account, client_token, access, refresh):
+        profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
+        expiries = {
+            r["kind"]: r["expires_at"]
+            for r in conn.execute(
+                "SELECT kind,expires_at FROM tokens WHERE hash IN (?,?)", (digest(access), digest(refresh))
+            )
+        }
+        selected = {"id": profile["uuid"], "name": profile["name"]}
+        return {
+            "login_name": account["login_name"],
+            "refresh_token": refresh,
+            "refresh_expires_at": expiries["refresh"],
+            "game_expires_at": expiries["game"],
+            "game": {
+                "accessToken": access,
+                "clientToken": client_token,
+                "selectedProfile": selected,
+                "availableProfiles": [selected],
+            },
+        }
 
     @app.delete("/api/v1/sessions/refresh", status_code=204)
     def revoke_launcher_session(authorization: str | None = Header(None)):
@@ -596,10 +668,39 @@ def create_app(settings: Settings | None = None):
                 )
 
     @app.post("/api/v1/logins/{request_id}/session")
-    def login_exchange(request_id: str, authorization: str | None = Header(None)):
+    def login_exchange(
+        request_id: str, authorization: str | None = Header(None), x_request_id: str | None = Header(None)
+    ):
+        poll = bearer(authorization)
+        if x_request_id is not None and not re.fullmatch(r"[a-f0-9]{64}", x_request_id):
+            raise Problem("INVALID_REQUEST", "无效的登录请求标识", 422)
         with db.write() as conn:
+            retry = conn.execute(
+                "SELECT * FROM login_retries WHERE request_id=? AND expires_at>?", (request_id, now())
+            ).fetchone()
+            if (
+                retry
+                and x_request_id
+                and secrets.compare_digest(retry["poll_hash"], digest(poll))
+                and secrets.compare_digest(retry["request_hash"], digest(x_request_id))
+            ):
+
+                def value(kind):
+                    return hmac.digest(
+                        poll.encode(), f"{x_request_id}:{retry['nonce']}:{kind}".encode(), "sha256"
+                    ).hex()
+
+                account = account_for_token(conn, value("refresh"), "refresh")
+                stored = conn.execute(
+                    "SELECT * FROM tokens WHERE hash=?", (retry["refresh_hash"],)
+                ).fetchone()
+                result = launcher_refresh_result(
+                    conn, account, stored["client_token"], value("game"), value("refresh")
+                )
+                result["management_token"] = value("management")
+                return result
             row = login_record(conn, request_id, authorization)
-            return exchange_session(conn, row, "login_requests", "VERIFIED")
+            return exchange_session(conn, row, "login_requests", "VERIFIED", x_request_id, poll)
 
     @app.post("/api/v1/registrations/{request_id}/session")
     def registration_exchange(request_id: str, authorization: str | None = Header(None)):

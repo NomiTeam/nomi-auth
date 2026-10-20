@@ -671,3 +671,81 @@ def test_refresh_expiry_scope_disable_and_revocation(client):
         conn.execute("UPDATE accounts SET status='disabled'")
         conn.execute("DELETE FROM tokens")
     assert client.post("/api/v1/sessions/refresh", headers=refresh_headers(disabled)).status_code == 403
+
+
+def test_refresh_retry_is_exact_bounded_and_revocable(client):
+    import time
+
+    create_account(client)
+    original = login(client)
+    headers = {**refresh_headers(original), "X-Request-ID": "a" * 64}
+    first = client.post("/api/v1/sessions/refresh", headers=headers)
+    assert first.status_code == 200
+    assert client.post("/api/v1/sessions/refresh", headers=headers).json() == first.json()
+    assert (
+        client.post("/api/v1/sessions/refresh", headers={**headers, "X-Request-ID": "b" * 64}).status_code
+        == 403
+    )
+    with client.app.state.db.read() as conn:
+        row = dict(conn.execute("SELECT * FROM refresh_retries").fetchone())
+        assert original["refresh_token"] not in str(row)
+        assert first.json()["refresh_token"] not in str(row)
+    client.delete("/api/v1/sessions/refresh", headers=refresh_headers(first.json()))
+    assert client.post("/api/v1/sessions/refresh", headers=headers).status_code == 403
+    second = login(client, event="second")
+    headers = {**refresh_headers(second), "X-Request-ID": "c" * 64}
+    assert client.post("/api/v1/sessions/refresh", headers=headers).status_code == 200
+    with client.app.state.db.write() as conn:
+        conn.execute("UPDATE refresh_retries SET expires_at=0")
+    client.app.state.db.cleanup(int(time.time()))
+    assert client.post("/api/v1/sessions/refresh", headers=headers).status_code == 403
+
+
+def test_concurrent_same_refresh_request_returns_one_grant(client):
+    create_account(client)
+    session = login(client)
+    headers = {**refresh_headers(session), "X-Request-ID": "d" * 64}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(lambda _: client.post("/api/v1/sessions/refresh", headers=headers), range(2))
+        )
+    assert all(r.status_code == 200 for r in responses)
+    assert responses[0].json() == responses[1].json()
+    with client.app.state.db.read() as conn:
+        assert conn.execute("SELECT count(*) FROM tokens WHERE kind='refresh'").fetchone()[0] == 1
+    with client.app.state.db.write() as conn:
+        conn.execute("UPDATE accounts SET status='disabled'")
+    assert client.post("/api/v1/sessions/refresh", headers=headers).status_code == 403
+
+
+def test_login_exchange_response_loss_is_retryable_and_revocable(client):
+    create_account(client)
+    request = client.post("/api/v1/logins").json()
+    verify(client, request, operation="login")
+    path = f"/api/v1/logins/{request['request_id']}/session"
+    headers = {**private(request), "X-Request-ID": "e" * 64}
+    first = client.post(path, headers=headers)
+    assert first.status_code == 200
+    assert client.post(path, headers=headers).json() == first.json()
+    assert client.post(path, headers={**headers, "Authorization": "Bearer other"}).status_code != 200
+    assert client.post(path, headers={**headers, "X-Request-ID": "f" * 64}).status_code != 200
+    client.delete("/api/v1/sessions/refresh", headers=refresh_headers(first.json()))
+    assert client.post(path, headers=headers).status_code != 200
+    with client.app.state.db.read() as conn:
+        assert conn.execute("SELECT count(*) FROM login_retries").fetchone()[0] == 0
+
+
+def test_authenticated_profile_syncs_bot_rename_without_changing_uuid(client):
+    create_account(client)
+    session = login(client)
+    headers = {"Authorization": "Bearer " + session["game"]["accessToken"]}
+    before = client.get("/api/v1/game/profile", headers=headers).json()
+    assert (
+        member_command(
+            client, "RenamedAlice", member="member", event="rename-sync", operation="rename"
+        ).json()["status"]
+        == "RENAMED"
+    )
+    after = client.get("/api/v1/game/profile", headers=headers).json()
+    assert after == {"id": before["id"], "name": "RenamedAlice"}
+    assert client.get("/api/v1/game/profile", headers=refresh_headers(session)).status_code == 403

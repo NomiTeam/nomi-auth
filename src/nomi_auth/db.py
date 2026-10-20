@@ -36,6 +36,17 @@ CREATE TABLE IF NOT EXISTS audit(
  id INTEGER PRIMARY KEY, action TEXT NOT NULL, account_id TEXT, detail TEXT, created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS token_expiry ON tokens(expires_at);
 CREATE INDEX IF NOT EXISTS registration_expiry ON registrations(expires_at);
+CREATE TABLE IF NOT EXISTS refresh_retries(
+ old_hash TEXT PRIMARY KEY, request_hash TEXT NOT NULL, nonce TEXT NOT NULL,
+ game_hash TEXT NOT NULL REFERENCES tokens(hash) ON DELETE CASCADE,
+ refresh_hash TEXT NOT NULL REFERENCES tokens(hash) ON DELETE CASCADE,
+ expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS login_retries(
+ request_id TEXT PRIMARY KEY, poll_hash TEXT NOT NULL, request_hash TEXT NOT NULL, nonce TEXT NOT NULL,
+ game_hash TEXT NOT NULL REFERENCES tokens(hash) ON DELETE CASCADE,
+ refresh_hash TEXT NOT NULL REFERENCES tokens(hash) ON DELETE CASCADE,
+ management_hash TEXT NOT NULL REFERENCES tokens(hash) ON DELETE CASCADE,
+ expires_at INTEGER NOT NULL);
 """
 
 
@@ -49,7 +60,7 @@ class Database:
         # v2 removes password storage while preserving accounts, identities and UUIDs.
         with self.write() as conn:
             versions = [r[0] for r in conn.execute("SELECT version FROM schema_versions")]
-            if versions and max(versions) > 4:
+            if versions and max(versions) > 5:
                 raise RuntimeError("Database schema is newer than this application")
             for table in ("accounts", "registrations"):
                 columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -78,11 +89,19 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS receipt_created ON receipts(created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS audit_created ON audit(created_at)")
             conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(4)")
+            conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(5)")
 
     def cleanup(self, timestamp: int):
         """Delete expired transient data without touching accounts, identities or UUIDs."""
         with self.write() as conn:
-            for table in ("tokens", "joins", "registrations", "login_requests"):
+            for table in (
+                "refresh_retries",
+                "login_retries",
+                "tokens",
+                "joins",
+                "registrations",
+                "login_requests",
+            ):
                 conn.execute(f"DELETE FROM {table} WHERE expires_at<=?", (timestamp,))
             for table in ("registrations", "login_requests"):
                 conn.execute(f"DELETE FROM {table} WHERE status='CANCELLED' OR session_issued=1")
