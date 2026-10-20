@@ -145,7 +145,7 @@ def test_concurrent_exchange_only_issues_once(client):
         responses = list(executor.map(lambda _: exchange(client, request), range(2)))
     assert sorted(r.status_code for r in responses) == [200, 404]
     with client.app.state.db.read() as conn:
-        assert conn.execute("SELECT count(*) FROM tokens").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM tokens").fetchone()[0] == 3
 
 
 def test_expired_and_cancelled_login(client):
@@ -584,3 +584,90 @@ def test_failed_result_deleted_after_private_read_only(client):
     assert client.get(path).status_code == 401
     assert client.get(path, headers=private(request)).json()["error"] == "NAME_TAKEN"
     assert client.get(path, headers=private(request)).status_code == 404
+
+
+def refresh_headers(session):
+    return {"Authorization": "Bearer " + session["refresh_token"]}
+
+
+def test_launcher_refresh_after_game_expiry_rotates_once(client):
+    create_account(client)
+    session = login(client)
+    with client.app.state.db.write() as conn:
+        conn.execute("UPDATE tokens SET expires_at=0 WHERE kind='game'")
+    assert client.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 403
+    refreshed = client.post("/api/v1/sessions/refresh", headers=refresh_headers(session))
+    assert refreshed.status_code == 200
+    renewed = refreshed.json()
+    assert renewed["game"]["selectedProfile"] == session["game"]["selectedProfile"]
+    assert renewed["refresh_token"] != session["refresh_token"]
+    assert renewed["game"]["accessToken"] != session["game"]["accessToken"]
+    assert renewed["refresh_expires_at"] - renewed["game_expires_at"] == 29 * 86400
+    assert client.post("/api/v1/sessions/refresh", headers=refresh_headers(session)).status_code == 403
+    assert client.post("/api/yggdrasil/authserver/validate", json=renewed["game"]).status_code == 204
+    assert (
+        client.post(
+            "/api/yggdrasil/authserver/validate", json={"accessToken": renewed["refresh_token"]}
+        ).status_code
+        == 403
+    )
+    with client.app.state.db.read() as conn:
+        from nomi_auth.security import digest
+
+        assert (
+            conn.execute(
+                "SELECT kind FROM tokens WHERE hash=?", (digest(renewed["refresh_token"]),)
+            ).fetchone()[0]
+            == "refresh"
+        )
+        assert (
+            conn.execute("SELECT count(*) FROM tokens WHERE hash=?", (renewed["refresh_token"],)).fetchone()[
+                0
+            ]
+            == 0
+        )
+
+
+def test_concurrent_refresh_only_one_wins_and_other_device_survives(client):
+    create_account(client)
+    first = login(client, event="first")
+    second = login(client, event="second")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(
+                lambda _: client.post("/api/v1/sessions/refresh", headers=refresh_headers(first)), range(2)
+            )
+        )
+    assert sorted(r.status_code for r in responses) == [200, 403]
+    assert client.post("/api/yggdrasil/authserver/validate", json=first["game"]).status_code == 403
+    assert client.post("/api/yggdrasil/authserver/validate", json=second["game"]).status_code == 204
+    assert client.post("/api/v1/sessions/refresh", headers=refresh_headers(second)).status_code == 200
+
+
+def test_refresh_expiry_scope_disable_and_revocation(client):
+    create_account(client)
+    session = login(client)
+    assert (
+        client.post(
+            "/api/v1/sessions/refresh", headers={"Authorization": "Bearer " + session["game"]["accessToken"]}
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/v1/sessions/refresh", headers={"Authorization": "Bearer " + session["management_token"]}
+        ).status_code
+        == 403
+    )
+    assert client.delete("/api/v1/sessions/refresh", headers=refresh_headers(session)).status_code == 204
+    assert client.post("/api/v1/sessions/refresh", headers=refresh_headers(session)).status_code == 403
+    assert client.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 403
+    expired = login(client, event="expired")
+    with client.app.state.db.write() as conn:
+        conn.execute("UPDATE tokens SET expires_at=0 WHERE kind='refresh'")
+    assert client.post("/api/v1/sessions/refresh", headers=refresh_headers(expired)).status_code == 403
+    disabled = login(client, event="disabled")
+    with client.app.state.db.write() as conn:
+        conn.execute("UPDATE accounts SET status='disabled'")
+        conn.execute("DELETE FROM tokens")
+    assert client.post("/api/v1/sessions/refresh", headers=refresh_headers(disabled)).status_code == 403

@@ -15,4 +15,5 @@ class Settings(BaseSettings):
     registration_ttl: int = Field(default=300, ge=30, le=1800)
     rename_cooldown: int = Field(default=604800, ge=0)
     game_token_ttl: int = Field(default=86400, ge=60)
+    refresh_token_ttl: int = Field(default=2592000, ge=60)
     management_token_ttl: int = Field(default=3600, ge=60)

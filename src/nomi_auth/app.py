@@ -180,7 +180,11 @@ def create_app(settings: Settings | None = None):
 
     def issue(conn, account_id, kind, client_token=None):
         token = secret()
-        ttl = cfg.game_token_ttl if kind == "game" else cfg.management_token_ttl
+        ttl = {
+            "game": cfg.game_token_ttl,
+            "refresh": cfg.refresh_token_ttl,
+            "management": cfg.management_token_ttl,
+        }[kind]
         conn.execute(
             "INSERT INTO tokens VALUES(?,?,?,?,?)",
             (digest(token), account_id, kind, client_token, now() + ttl),
@@ -532,12 +536,16 @@ def create_app(settings: Settings | None = None):
         client_token = secret()
         game_token = issue(conn, account["id"], "game", client_token)
         management_token = issue(conn, account["id"], "management")
+        refresh_token = issue(conn, account["id"], "refresh", client_token)
         conn.execute(f"DELETE FROM {table} WHERE id=?", (row["id"],))
         selected = {"id": profile["uuid"], "name": profile["name"]}
         audit(conn, "qq_session_issued", account["id"])
         return {
             "login_name": account["login_name"],
             "management_token": management_token,
+            "refresh_token": refresh_token,
+            "refresh_expires_at": now() + cfg.refresh_token_ttl,
+            "game_expires_at": now() + cfg.game_token_ttl,
             "game": {
                 "accessToken": game_token,
                 "clientToken": client_token,
@@ -545,6 +553,47 @@ def create_app(settings: Settings | None = None):
                 "availableProfiles": [selected],
             },
         }
+
+    @app.post("/api/v1/sessions/refresh")
+    def refresh_launcher_session(authorization: str | None = Header(None)):
+        token = bearer(authorization)
+        with db.write() as conn:
+            account = account_for_token(conn, token, "refresh")
+            stored = conn.execute("SELECT * FROM tokens WHERE hash=?", (digest(token),)).fetchone()
+            profile = conn.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
+            # Atomic single-use rotation. Other devices have independent client tokens.
+            conn.execute(
+                "DELETE FROM tokens WHERE hash=? OR (account_id=? AND kind='game' AND client_token=?)",
+                (digest(token), account["id"], stored["client_token"]),
+            )
+            access = issue(conn, account["id"], "game", stored["client_token"])
+            refresh = issue(conn, account["id"], "refresh", stored["client_token"])
+            selected = {"id": profile["uuid"], "name": profile["name"]}
+            return {
+                "login_name": account["login_name"],
+                "refresh_token": refresh,
+                "refresh_expires_at": now() + cfg.refresh_token_ttl,
+                "game_expires_at": now() + cfg.game_token_ttl,
+                "game": {
+                    "accessToken": access,
+                    "clientToken": stored["client_token"],
+                    "selectedProfile": selected,
+                    "availableProfiles": [selected],
+                },
+            }
+
+    @app.delete("/api/v1/sessions/refresh", status_code=204)
+    def revoke_launcher_session(authorization: str | None = Header(None)):
+        token = bearer(authorization)
+        with db.write() as conn:
+            row = conn.execute(
+                "SELECT * FROM tokens WHERE hash=? AND kind='refresh'", (digest(token),)
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "DELETE FROM tokens WHERE account_id=? AND client_token=? AND kind IN ('game','refresh')",
+                    (row["account_id"], row["client_token"]),
+                )
 
     @app.post("/api/v1/logins/{request_id}/session")
     def login_exchange(request_id: str, authorization: str | None = Header(None)):
