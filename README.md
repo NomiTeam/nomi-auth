@@ -1,6 +1,6 @@
 # Nomi Auth
 
-FastAPI + SQLite 的单群账号与 Yggdrasil 服务，供 Nomi 启动器和 QQ 插件使用，不存储用户密码。
+FastAPI + SQLite 的单群账号与 Yggdrasil 服务，供 [Nomi 启动器](https://github.com/NomiTeam/nomi-launcher)和 [QQ 机器人插件](https://github.com/NomiTeam/nomi-auth-plugin)使用，不存储用户密码。
 
 ## 本地运行
 
