@@ -159,7 +159,9 @@ def test_expired_and_cancelled_login(client):
     assert verify(client, other, operation="login", event="verified").status_code == 200
     with client.app.state.db.write() as conn:
         conn.execute("UPDATE login_requests SET expires_at=0 WHERE id=?", (other["request_id"],))
-    assert exchange(client, other, "login").status_code == 404
+    expired = exchange(client, other, "login")
+    assert expired.status_code == 400
+    assert expired.json()["code"] == "REQUEST_EXPIRED"
 
 
 def test_unknown_name_generic_response_and_disabled_account(client):
@@ -252,6 +254,49 @@ def test_skin_reencoding_and_token_scope(client):
         ).status_code
         == 400
     )
+
+
+def test_complete_snapshot_restores_login_skin_and_signature(client, tmp_path):
+    from nomi_auth.maintenance import backup_data, restore_data
+
+    create_account(client)
+    session = login(client)
+    png = io.BytesIO()
+    Image.new("RGBA", (64, 64), "blue").save(png, format="PNG")
+    uploaded = client.put("/api/v1/me/profile/skin",
+        headers={"Authorization": "Bearer " + session["management_token"]},
+        files={"image": ("skin.png", png.getvalue(), "image/png")}).json()
+    archive = tmp_path / "complete.tar.gz"
+    backup_data(client.app.state.db, archive)
+    restore_data(archive, tmp_path / "restored")
+    restored = TestClient(create_app(Settings(data_dir=tmp_path / "restored", bot_token="x" * 32,
+                                            bot_app_id="app", group_openid="group")))
+    assert restored.get("/api/yggdrasil/").json()["signaturePublickey"] == client.get("/api/yggdrasil/").json()["signaturePublickey"]
+    assert restored.get("/textures/" + uploaded["hash"]).content == client.get("/textures/" + uploaded["hash"]).content
+    assert restored.get("/api/v1/game/profile", headers={"Authorization": "Bearer " + session["game"]["accessToken"]}).json() == {
+        "id": session["game"]["selectedProfile"]["id"], "name": "Alice"}
+
+
+def test_clearing_old_skin_starts_retention_when_unreferenced(client):
+    import os
+    import time
+
+    from nomi_auth.maintenance import cleanup_textures
+
+    create_account(client)
+    session = login(client)
+    headers = {"Authorization": "Bearer " + session["management_token"]}
+    png = io.BytesIO()
+    Image.new("RGBA", (64, 64), "blue").save(png, format="PNG")
+    uploaded = client.put("/api/v1/me/profile/skin", headers=headers,
+        files={"image": ("skin.png", png.getvalue(), "image/png")}).json()
+    path = client.app.state.db.path.parent / "textures" / uploaded["hash"]
+    old = time.time() - 90000
+    os.utime(path, (old, old))
+    assert client.delete("/api/v1/me/profile/skin", headers=headers).status_code == 204
+    assert cleanup_textures(client.app.state.db, int(time.time())) == 0
+    assert path.exists()
+    assert cleanup_textures(client.app.state.db, int(time.time()) + 86401) == 1
 
 
 def test_password_routes_removed_and_legacy_auth_disabled(client):
@@ -409,7 +454,7 @@ def test_pending_member_only_one_request_expiry_and_cancellation(client):
     verify(client, second, member="new", event="retry", operation="login")
     with client.app.state.db.write() as conn:
         conn.execute("UPDATE login_requests SET expires_at=0 WHERE id=?", (second["request_id"],))
-    assert member_command(client, "TooLate", event="late").json()["code"] == "NO_PENDING_REGISTRATION"
+    assert member_command(client, "TooLate", event="late").json()["code"] == "REQUEST_EXPIRED"
 
 
 def test_register_cancel_race_in_unified_flow(client):

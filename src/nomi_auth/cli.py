@@ -1,12 +1,12 @@
 """Local maintenance commands. Run with the service's environment and filesystem access."""
 
 import argparse
-import sqlite3
 import time
 from pathlib import Path
 
 from .config import Settings
 from .db import Database
+from .maintenance import backup_data, cleanup_textures, restore_data
 
 
 def main():
@@ -14,25 +14,29 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     backup = sub.add_parser("backup")
     backup.add_argument("destination", type=Path)
+    restore = sub.add_parser("restore")
+    restore.add_argument("archive", type=Path)
+    restore.add_argument("destination", type=Path)
     disable = sub.add_parser("disable")
     disable.add_argument("login_name")
     enable = sub.add_parser("enable")
     enable.add_argument("login_name")
     sub.add_parser("cleanup")
     args = parser.parse_args()
+    if args.command == "restore":
+        restore_data(args.archive, args.destination)
+        print(f"Restored data directory: {args.destination}")
+        return
     cfg = Settings()
     db = Database(cfg.data_dir / "nomi-auth.sqlite3")
     if args.command == "backup":
-        if args.destination.exists():
-            parser.error("Destination already exists; select a new backup filename")
-        args.destination.parent.mkdir(parents=True, exist_ok=True)
-        with db.read() as source, sqlite3.connect(args.destination) as target:
-            source.backup(target)
-        print(f"Database snapshot: {args.destination}")
+        backup_data(db, args.destination)
+        print(f"Complete data snapshot: {args.destination}")
         return
     timestamp = int(time.time())
     if args.command == "cleanup":
         db.cleanup(timestamp)
+        cleanup_textures(db, timestamp)
         print("Expired transient data deleted; receipts and audit retained for one day.")
         return
     with db.write() as conn:

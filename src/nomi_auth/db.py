@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -53,6 +54,8 @@ CREATE TABLE IF NOT EXISTS login_retries(
 class Database:
     def __init__(self, path: Path):
         self.path = path
+        self._cleanup_lock = threading.Lock()
+        self._last_cleanup = None
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.read() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -90,6 +93,14 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS audit_created ON audit(created_at)")
             conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(4)")
             conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(5)")
+
+    def cleanup_if_due(self, timestamp: int):
+        """Coalesce concurrent maintenance requests; failures remain eligible for retry."""
+        with self._cleanup_lock:
+            if self._last_cleanup is not None and 0 <= timestamp - self._last_cleanup < 30:
+                return
+            self.cleanup(timestamp)
+            self._last_cleanup = timestamp
 
     def cleanup(self, timestamp: int):
         """Delete expired transient data without touching accounts, identities or UUIDs."""

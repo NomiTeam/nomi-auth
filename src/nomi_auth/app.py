@@ -81,10 +81,15 @@ def create_app(settings: Settings | None = None):
     @asynccontextmanager
     async def lifespan(app):
         async def sweep():
+            next_texture_cleanup = 0
             while True:
                 try:
-                    await asyncio.to_thread(db.cleanup, now())
-                except sqlite3.Error:
+                    await asyncio.to_thread(db.cleanup_if_due, now())
+                    if now() >= next_texture_cleanup:
+                        from .maintenance import cleanup_textures
+                        await asyncio.to_thread(cleanup_textures, db, now())
+                        next_texture_cleanup = now() + 3600
+                except (sqlite3.Error, OSError):
                     logging.getLogger(__name__).exception("Transient data cleanup failed")
                 await asyncio.sleep(30)
 
@@ -127,7 +132,7 @@ def create_app(settings: Settings | None = None):
             return JSONResponse({"code": "RATE_LIMITED", "message": "请求过于频繁"}, 429)
         # Access-time cleanup also covers expired records when the service was stopped.
         try:
-            await asyncio.to_thread(db.cleanup, now())
+            await asyncio.to_thread(db.cleanup_if_due, now())
         except sqlite3.Error:
             return JSONResponse({"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503)
         response = await call_next(request)
@@ -840,12 +845,20 @@ def create_app(settings: Settings | None = None):
         content = output.getvalue()
         texture_hash = hashlib.sha256(content).hexdigest()
         target = texture_dir / texture_hash
-        if not target.exists():
-            temporary = texture_dir / ("." + uuid.uuid4().hex)
-            temporary.write_bytes(content)
-            temporary.replace(target)
         with db.write() as conn:
             account = checked_account(conn)
+            # Serialize file publication with maintenance and backup snapshots.
+            if not target.exists():
+                temporary = texture_dir / ("." + uuid.uuid4().hex)
+                try:
+                    temporary.write_bytes(content)
+                    temporary.replace(target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            old = conn.execute("SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)).fetchone()[0]
+            if old and old != texture_hash and (texture_dir / old).is_file():
+                # Retention starts when a texture stops being used, not when it was first uploaded.
+                (texture_dir / old).touch()
             conn.execute(
                 "UPDATE profiles SET skin_hash=?,skin_model=? WHERE account_id=?",
                 (texture_hash, model, account["id"]),
@@ -871,6 +884,9 @@ def create_app(settings: Settings | None = None):
     def clear_skin(authorization: str | None = Header(None)):
         with db.write() as conn:
             account = account_for_token(conn, bearer(authorization), "management")
+            old = conn.execute("SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)).fetchone()[0]
+            if old and (texture_dir / old).is_file():
+                (texture_dir / old).touch()
             conn.execute("UPDATE profiles SET skin_hash=NULL WHERE account_id=?", (account["id"],))
 
     @app.get("/textures/{texture_hash}")
