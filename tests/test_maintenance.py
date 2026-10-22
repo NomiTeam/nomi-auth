@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import sqlite3
@@ -13,6 +14,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from nomi_auth.db import Database
 from nomi_auth.maintenance import backup_data, cleanup_textures, restore_data
 
+SKIN_HASH = hashlib.sha256(b"skin").hexdigest()
+
 
 @pytest.fixture
 def data(tmp_path):
@@ -21,7 +24,7 @@ def data(tmp_path):
     (root / "texture-signing.pem").write_bytes(rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
     (root / "textures").mkdir()
-    name = "a" * 64
+    name = SKIN_HASH
     (root / "textures" / name).write_bytes(b"skin")
     with db.write() as conn:
         conn.execute("INSERT INTO accounts VALUES('account','Alice','alice','active',1)")
@@ -39,7 +42,7 @@ def test_complete_backup_restore_and_overwrite_protection(data, tmp_path):
     destination = tmp_path / "restored"
     restore_data(archive, destination)
     assert (destination / "texture-signing.pem").read_bytes() == (data.path.parent / "texture-signing.pem").read_bytes()
-    assert (destination / "textures" / ("a" * 64)).read_bytes() == b"skin"
+    assert (destination / "textures" / (SKIN_HASH)).read_bytes() == b"skin"
     with sqlite3.connect(destination / "nomi-auth.sqlite3") as conn:
         assert conn.execute("SELECT name,uuid FROM profiles").fetchone() == ("Alice", "profile")
     with pytest.raises(FileExistsError):
@@ -47,11 +50,39 @@ def test_complete_backup_restore_and_overwrite_protection(data, tmp_path):
 
 
 def test_missing_skin_prevents_incomplete_backup(data, tmp_path):
-    (data.path.parent / "textures" / ("a" * 64)).unlink()
+    (data.path.parent / "textures" / (SKIN_HASH)).unlink()
     archive = tmp_path / "snapshot.tar.gz"
     with pytest.raises(FileNotFoundError):
         backup_data(data, archive)
     assert not archive.exists()
+
+
+def test_corrupt_skin_prevents_incomplete_backup(data, tmp_path):
+    (data.path.parent / "textures" / SKIN_HASH).write_bytes(b"corrupted")
+    archive = tmp_path / "snapshot.tar.gz"
+    with pytest.raises(ValueError, match="corrupt texture"):
+        backup_data(data, archive)
+    assert not archive.exists()
+
+
+def test_restore_rejects_corrupt_skin_without_publishing_directory(data, tmp_path):
+    archive = tmp_path / "snapshot.tar.gz"
+    corrupt = tmp_path / "corrupt-skin.tar.gz"
+    backup_data(data, archive)
+    with tarfile.open(archive, "r:gz") as source, tarfile.open(corrupt, "w:gz") as target:
+        for member in source:
+            stream = source.extractfile(member)
+            if member.name.startswith("textures/"):
+                content = b"corrupted"
+                member.size = len(content)
+                target.addfile(member, io.BytesIO(content))
+            else:
+                target.addfile(member, stream)
+            if stream is not None:
+                stream.close()
+    with pytest.raises(ValueError, match="corrupt texture"):
+        restore_data(corrupt, tmp_path / "restored")
+    assert not (tmp_path / "restored").exists()
 
 
 def test_restore_rejects_corrupt_database_without_publishing_directory(data, tmp_path):
@@ -89,7 +120,7 @@ def test_unsafe_archive_cannot_write_outside_restore(tmp_path, name):
 
 def test_texture_cleanup_keeps_references_and_recent_files(data):
     root = data.path.parent / "textures"
-    referenced = root / ("a" * 64)
+    referenced = root / (SKIN_HASH)
     orphan = root / ("b" * 64)
     recent = root / ("c" * 64)
     orphan.write_bytes(b"old")

@@ -1,5 +1,6 @@
 """Complete local snapshots and conservative orphan-texture maintenance."""
 
+import hashlib
 import re
 import shutil
 import sqlite3
@@ -42,6 +43,9 @@ def validate_snapshot(directory: Path):
             name = row[0]
             if not re.fullmatch(r"[0-9a-f]{64}", name) or not (directory / "textures" / name).is_file():
                 raise ValueError("Snapshot is missing a referenced texture")
+            texture = directory / "textures" / name
+            if texture.stat().st_size > 1024 * 1024 or hashlib.sha256(texture.read_bytes()).hexdigest() != name:
+                raise ValueError("Snapshot contains a corrupt texture")
 
 
 def backup_data(db: Database, destination: Path):

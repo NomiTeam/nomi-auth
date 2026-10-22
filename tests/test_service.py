@@ -320,6 +320,30 @@ def test_password_routes_removed_and_legacy_auth_disabled(client):
         assert "password_hash" not in {r[1] for r in conn.execute("PRAGMA table_info(registrations)")}
 
 
+def test_non_ascii_bot_credential_is_rejected_without_server_error(client):
+    response = client.post("/internal/v1/logins/verify", headers={"Authorization": b"Bearer \xff"}, json={
+        "code": "ABCD", "bot_app_id": "app", "group_openid": "group", "member_openid": "member", "event_id": "invalid-auth"
+    })
+    assert response.status_code == 401 and response.json()["code"] == "UNAUTHORIZED"
+
+
+def test_yggdrasil_profile_accepts_uuid_forms_and_rejects_invalid_ids(client):
+    import uuid
+
+    request = create_account(client)
+    session = exchange(client, request).json()
+    profile_id = session["game"]["selectedProfile"]["id"]
+    root = "/api/yggdrasil/sessionserver/session/minecraft/profile/"
+    expected = client.get(root + profile_id + "?unsigned=false").json()
+    for value in (profile_id.upper(), str(uuid.UUID(profile_id))):
+        actual = client.get(root + value + "?unsigned=false").json()
+        assert (actual["id"], actual["name"]) == (expected["id"], expected["name"])
+        assert actual["properties"][0]["signature"]
+        decoded = json.loads(base64.b64decode(actual["properties"][0]["value"]))
+        assert decoded["profileId"] == profile_id
+    assert client.get(root + "invalid").status_code == 204
+
+
 def test_restart_keeps_verified_login_and_key(client):
     create_account(client)
     request = client.post("/api/v1/logins", json={}).json()

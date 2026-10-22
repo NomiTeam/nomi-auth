@@ -169,7 +169,7 @@ def create_app(settings: Settings | None = None):
         return header[7:]
 
     def bot_auth(header, body):
-        if not secrets.compare_digest(bearer(header), cfg.bot_token):
+        if not secrets.compare_digest(bearer(header).encode(), cfg.bot_token.encode()):
             raise Problem("UNAUTHORIZED", "机器人凭证无效", 401)
         if body.bot_app_id != cfg.bot_app_id or body.group_openid != cfg.group_openid:
             raise Problem("WRONG_GROUP", "仅允许指定机器人与群")
@@ -1051,6 +1051,10 @@ def install_yggdrasil(app, cfg, db, account_for_token, issue):
 
     @app.get(root + "/sessionserver/session/minecraft/profile/{profile_id}")
     def get_profile(profile_id: str, unsigned: bool = True):
+        try:
+            profile_id = uuid.UUID(profile_id).hex
+        except ValueError:
+            return Response(status_code=204)
         with db.read() as conn:
             row = conn.execute(
                 "SELECT p.* FROM profiles p JOIN accounts a ON a.id=p.account_id WHERE uuid=? AND a.status='active'",
