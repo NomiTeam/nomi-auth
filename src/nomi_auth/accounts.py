@@ -68,11 +68,13 @@ class AccountManager:
         kind: str,
         client_token: str | None = None,
         token: str | None = None,
+        issued_at: int | None = None,
     ) -> str:
         """
         Store a token hash and return the raw token to the caller once.
         """
         token = token or secret()
+        issued_at = current_timestamp() if issued_at is None else issued_at
         ttl = {
             "game": self.settings.game_token_ttl,
             "refresh": self.settings.refresh_token_ttl,
@@ -80,7 +82,7 @@ class AccountManager:
         }[kind]
         connection.execute(
             "INSERT INTO tokens VALUES(?,?,?,?,?)",
-            (digest(token), account_id, kind, client_token, current_timestamp() + ttl),
+            (digest(token), account_id, kind, client_token, issued_at + ttl),
         )
         return token
 

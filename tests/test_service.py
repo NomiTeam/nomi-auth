@@ -1162,3 +1162,30 @@ def test_unsupported_signing_key_is_rejected_without_replacing_it(tmp_path):
     with pytest.raises(TypeError, match="RSA"):
         create_app(settings)
     assert key_file.read_bytes() == content
+
+
+@pytest.mark.parametrize("request_id", [None, "b" * 64])
+def test_one_grant_uses_one_issue_timestamp(client, monkeypatch, request_id):
+    import time
+
+    from nomi_auth import accounts
+
+    create_account(client)
+    clock = int(time.time())
+
+    def advancing_time():
+        nonlocal clock
+        clock += 1
+        return clock
+
+    # Separate token inserts would observe different seconds without a grant timestamp.
+    monkeypatch.setattr(accounts, "current_timestamp", advancing_time)
+    session = login(client)
+    assert session["refresh_expires_at"] - session["game_expires_at"] == 29 * 86400
+    headers = refresh_headers(session)
+    if request_id is not None:
+        headers["X-Request-ID"] = request_id
+    response = client.post("/api/v1/sessions/refresh", headers=headers)
+    assert response.status_code == 200
+    renewed = response.json()
+    assert renewed["refresh_expires_at"] - renewed["game_expires_at"] == 29 * 86400

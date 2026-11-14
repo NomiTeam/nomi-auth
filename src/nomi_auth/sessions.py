@@ -60,14 +60,29 @@ class SessionManager:
                 return None
             return derive_token(poll_token, retry_key, nonce, kind)
 
+        issued_at = current_timestamp()
         game_token = self.accounts.issue_token(
-            connection, account["id"], "game", client_token, login_token("game")
+            connection,
+            account["id"],
+            "game",
+            client_token,
+            login_token("game"),
+            issued_at=issued_at,
         )
         management_token = self.accounts.issue_token(
-            connection, account["id"], "management", token=login_token("management")
+            connection,
+            account["id"],
+            "management",
+            token=login_token("management"),
+            issued_at=issued_at,
         )
         refresh_token = self.accounts.issue_token(
-            connection, account["id"], "refresh", client_token, login_token("refresh")
+            connection,
+            account["id"],
+            "refresh",
+            client_token,
+            login_token("refresh"),
+            issued_at=issued_at,
         )
         if retry_key and poll_token is not None:
             connection.execute(
@@ -186,12 +201,14 @@ class SessionManager:
         previous_token: str,
         request_id: str | None,
     ) -> tuple[str, str]:
+        # A single grant uses one timestamp even when database calls cross a second.
+        issued_at = current_timestamp()
         if request_id is None:
             access_token = self.accounts.issue_token(
-                connection, account_id, "game", client_token
+                connection, account_id, "game", client_token, issued_at=issued_at
             )
             refresh_token = self.accounts.issue_token(
-                connection, account_id, "refresh", client_token
+                connection, account_id, "refresh", client_token, issued_at=issued_at
             )
             return access_token, refresh_token
 
@@ -199,10 +216,20 @@ class SessionManager:
         access_token = derive_token(previous_token, request_id, nonce, "game")
         refresh_token = derive_token(previous_token, request_id, nonce, "refresh")
         self.accounts.issue_token(
-            connection, account_id, "game", client_token, access_token
+            connection,
+            account_id,
+            "game",
+            client_token,
+            access_token,
+            issued_at=issued_at,
         )
         self.accounts.issue_token(
-            connection, account_id, "refresh", client_token, refresh_token
+            connection,
+            account_id,
+            "refresh",
+            client_token,
+            refresh_token,
+            issued_at=issued_at,
         )
         connection.execute(
             "INSERT INTO refresh_retries VALUES(?,?,?,?,?,?)",
