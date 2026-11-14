@@ -13,8 +13,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
-from .db import Database
-from .errors import Problem
+from src.core.errors import Problem
+from src.storage.database import Database
 
 
 class Runtime:
@@ -38,7 +38,7 @@ class Runtime:
                 await cleanup_task
 
     async def _cleanup(self) -> None:
-        from .maintenance import cleanup_textures
+        from src.storage.maintenance import cleanup_textures
 
         next_texture_cleanup = 0
         while True:

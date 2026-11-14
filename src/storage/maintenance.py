@@ -13,7 +13,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from .db import Database
+from src.storage.database import Database
 
 
 def cleanup_textures(database: Database, timestamp: int, retention: int = 86400):
@@ -88,7 +88,7 @@ def backup_data(database: Database, destination: Path):
         # Writers publish texture files under this same database lock.
         with database.write() as locked:
             if database.backend == "mysql":
-                from .transfer import export_sqlite
+                from src.storage.transfer import export_sqlite
 
                 export_sqlite(locked, root / "nomi-auth.sqlite3")
             else:

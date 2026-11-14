@@ -4,12 +4,12 @@ from typing import Any
 
 from fastapi import FastAPI, Header
 
-from .accounts import AccountManager
-from .config import Settings
-from .database_types import Connection
-from .db import Database
-from .errors import Problem
-from .security import current_timestamp, derive_token, digest, secret
+from src.core.config import Settings
+from src.core.errors import Problem
+from src.core.security import current_timestamp, derive_token, digest, secret
+from src.services.accounts import AccountManager
+from src.storage.database import Database
+from src.storage.types import Connection
 
 
 class SessionManager:

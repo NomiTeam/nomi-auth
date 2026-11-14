@@ -7,8 +7,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from .database_types import Connection
-from .db import Database
+from src.storage.database import Database
+from src.storage.types import Connection
 
 TABLES = (
     "schema_versions",

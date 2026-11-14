@@ -14,7 +14,7 @@
 
 ```shell
 uv sync
-uv run uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1
+uv run uvicorn src.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 接口说明见 [API.md](API.md)。`/health` 检查应用与数据库连接；认证根路径为 `/api/yggdrasil/`。服务不提供 HTML 页面，也不开放在线文档或 OpenAPI JSON。公网入口应使用 HTTPS。
@@ -45,11 +45,11 @@ ID 为 3–16 位字母、数字或下划线。改名默认冷却 7 天，UUID �
 ## 数据维护
 
 ```shell
-uv run python -m nomi_auth.cli backup backups/nomi.tar.gz
-uv run python -m nomi_auth.cli restore backups/nomi.tar.gz restored-data
-uv run python -m nomi_auth.cli disable Alice
-uv run python -m nomi_auth.cli enable Alice
-uv run python -m nomi_auth.cli cleanup
+uv run python -m src.cli backup backups/nomi.tar.gz
+uv run python -m src.cli restore backups/nomi.tar.gz restored-data
+uv run python -m src.cli disable Alice
+uv run python -m src.cli enable Alice
+uv run python -m src.cli cleanup
 ```
 
 备份包含数据库、正在使用的皮肤和签名私钥，不能公开。恢复只写入新目录，不覆盖已有数据。
@@ -58,7 +58,7 @@ uv run python -m nomi_auth.cli cleanup
 
 1. 停止旧认证服务，创建最终完整备份，保留旧数据目录。
 2. 在目标环境恢复到新目录，将 `NOMI_DATA_DIR` 指向它，配置 MySQL/MariaDB 空库。
-3. 执行 `uv run python -m nomi_auth.cli migrate-database restored-data/nomi-auth.sqlite3`。
+3. 执行 `uv run python -m src.cli migrate-database restored-data/nomi-auth.sqlite3`。
 4. 验证已有账号和皮肤后切换访问入口，避免新旧服务同时写入。
 
 迁移只读源文件，在一个事务中导入并逐字段核对，非空目标会拒绝导入。账号、UUID、群绑定和令牌都会保留。MySQL 的完整备份同样包含 SQLite 快照，因此也能恢复回 SQLite。当前数据库版本为 5，SQLite 旧版本会在启动时升级。
@@ -66,18 +66,27 @@ uv run python -m nomi_auth.cli cleanup
 ## 项目结构
 
 ```text
-src/nomi_auth/
+src/
 ├── app.py                 - 创建应用，组合各个管理对象
-├── accounts.py            - 账号校验、创建和令牌签发
-├── logins.py              - 统一登录与群成员注册
-├── registrations.py       - 兼容旧版独立注册流程
-├── sessions.py            - 会话领取、续期和撤销
-├── profiles.py / skins.py - 改名、皮肤校验和文件存储
-├── yggdrasil.py            - 游戏认证与材质签名
-├── db.py / mysql.py        - 数据库事务和表结构升级
-├── maintenance.py         - 备份、恢复和皮肤清理
-├── transfer.py            - 数据库迁移与核对
-└── runtime.py             - 限流和后台清理
+├── cli.py                 - 备份、恢复和账号维护入口
+├── core/
+│   ├── config.py          - 服务配置
+│   ├── models.py          - 请求参数
+│   ├── security.py        - 令牌和验证码工具
+│   └── runtime.py         - 限流和后台清理
+├── services/
+│   ├── accounts.py        - 账号校验、创建和令牌签发
+│   ├── logins.py          - 统一登录与群成员注册
+│   ├── registrations.py   - 兼容旧版独立注册流程
+│   ├── sessions.py        - 会话领取、续期和撤销
+│   ├── profiles.py        - 改名和皮肤管理
+│   └── yggdrasil.py       - 游戏认证与材质签名
+└── storage/
+    ├── database.py        - SQLite 事务和表结构升级
+    ├── mysql.py           - MySQL/MariaDB 数据库
+    ├── skins.py           - 皮肤校验和文件存储
+    ├── maintenance.py     - 备份、恢复和清理
+    └── transfer.py        - 数据库迁移与核对
 ```
 
 登录、注册和游戏认证共用账号规则，避免各接口各自修改身份。写事务同时保护验证码认领、令牌轮换和皮肤文件发布；MySQL 使用连接级写锁，保留 SQLite 原有的操作顺序。

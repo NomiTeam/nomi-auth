@@ -2,9 +2,9 @@ import os
 
 import pytest
 
-from nomi_auth.config import Settings
-from nomi_auth.db import Database
-from nomi_auth.transfer import TABLES
+from src.core.config import Settings
+from src.storage.database import Database
+from src.storage.transfer import TABLES
 
 
 @pytest.fixture(params=["sqlite", "mysql"])

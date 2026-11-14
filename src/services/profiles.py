@@ -6,15 +6,15 @@ from typing import Any
 from fastapi import FastAPI, File, Form, Header, UploadFile
 from fastapi.responses import FileResponse, Response
 
-from .accounts import AccountManager
-from .config import Settings
-from .database_types import Connection
-from .db import Database
-from .errors import Problem
-from .models import MemberOperation, Rename
-from .receipts import ReceiptManager
-from .security import current_timestamp, digest
-from .skins import SkinStore
+from src.core.config import Settings
+from src.core.errors import Problem
+from src.core.models import MemberOperation, Rename
+from src.core.security import current_timestamp, digest
+from src.services.accounts import AccountManager
+from src.services.receipts import ReceiptManager
+from src.storage.database import Database
+from src.storage.skins import SkinStore
+from src.storage.types import Connection
 
 
 class ProfileManager:

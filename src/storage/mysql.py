@@ -9,8 +9,8 @@ from contextlib import closing, contextmanager
 
 import pymysql
 
-from .config import Settings
-from .db import Database
+from src.core.config import Settings
+from src.storage.database import Database
 
 # Keep column order compatible with SQLite and existing positional inserts.
 # Indexed identifiers have explicit bounds; other payloads remain unrestricted TEXT.

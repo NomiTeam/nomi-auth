@@ -6,9 +6,9 @@ import argparse
 import time
 from pathlib import Path
 
-from .config import Settings
-from .db import Database
-from .maintenance import backup_data, cleanup_textures, restore_data
+from src.core.config import Settings
+from src.storage.database import Database
+from src.storage.maintenance import backup_data, cleanup_textures, restore_data
 
 
 def main():
@@ -36,7 +36,7 @@ def main():
     settings = Settings()
     database = Database.from_settings(settings)
     if args.command == "migrate-database":
-        from .transfer import import_sqlite
+        from src.storage.transfer import import_sqlite
 
         counts = import_sqlite(args.source, database)
         print(f"Migration verified: {sum(counts.values())} rows; source unchanged.")

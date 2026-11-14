@@ -11,11 +11,11 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from test_service import create_account, login, request_account, verify
 
-from nomi_auth.app import create_app
-from nomi_auth.config import Settings
-from nomi_auth.db import Database
-from nomi_auth.maintenance import backup_data, restore_data
-from nomi_auth.transfer import TABLES, import_sqlite
+from src.app import create_app
+from src.core.config import Settings
+from src.storage.database import Database
+from src.storage.maintenance import backup_data, restore_data
+from src.storage.transfer import TABLES, import_sqlite
 
 
 @pytest.fixture
@@ -271,7 +271,7 @@ def test_cli_migration_backup_disable_and_cleanup(mysql_settings, tmp_path):
 
     def command(*args):
         result = subprocess.run(
-            [sys.executable, "-m", "nomi_auth.cli", *args],
+            [sys.executable, "-m", "src.cli", *args],
             env=env,
             capture_output=True,
             text=True,

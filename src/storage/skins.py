@@ -7,7 +7,7 @@ from typing import BinaryIO
 
 from PIL import Image, UnidentifiedImageError
 
-from .errors import Problem
+from src.core.errors import Problem
 
 
 class SkinStore:

@@ -4,16 +4,16 @@ Create the application and connect its account services to HTTP routes.
 
 from fastapi import FastAPI
 
-from .accounts import AccountManager
-from .config import Settings
-from .db import Database
-from .logins import LoginManager
-from .profiles import ProfileManager
-from .receipts import ReceiptManager
-from .registrations import RegistrationManager
-from .runtime import Runtime
-from .sessions import SessionManager
-from .yggdrasil import Yggdrasil
+from src.core.config import Settings
+from src.core.runtime import Runtime
+from src.services.accounts import AccountManager
+from src.services.logins import LoginManager
+from src.services.profiles import ProfileManager
+from src.services.receipts import ReceiptManager
+from src.services.registrations import RegistrationManager
+from src.services.sessions import SessionManager
+from src.services.yggdrasil import Yggdrasil
+from src.storage.database import Database
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

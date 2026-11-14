@@ -11,8 +11,8 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from nomi_auth.app import create_app
-from nomi_auth.config import Settings
+from src.app import create_app
+from src.core.config import Settings
 
 
 @pytest.fixture
@@ -324,7 +324,7 @@ def test_skin_reencoding_and_token_scope(client):
 
 
 def test_complete_snapshot_restores_login_skin_and_signature(client, tmp_path):
-    from nomi_auth.maintenance import backup_data, restore_data
+    from src.storage.maintenance import backup_data, restore_data
 
     create_account(client)
     session = login(client)
@@ -366,7 +366,7 @@ def test_clearing_old_skin_starts_retention_when_unreferenced(client):
     import os
     import time
 
-    from nomi_auth.maintenance import cleanup_textures
+    from src.storage.maintenance import cleanup_textures
 
     create_account(client)
     session = login(client)
@@ -899,7 +899,7 @@ def test_launcher_refresh_after_game_expiry_rotates_once(client):
         == 403
     )
     with client.app.state.db.read() as conn:
-        from nomi_auth.security import digest
+        from src.core.security import digest
 
         assert (
             conn.execute(
@@ -1112,7 +1112,7 @@ def test_authenticated_profile_syncs_bot_rename_without_changing_uuid(client):
 
 
 def test_schema_four_upgrade_keeps_existing_accounts_and_sessions(client):
-    from nomi_auth.db import Database
+    from src.storage.database import Database
 
     if client.app.state.db.backend != "sqlite":
         pytest.skip("Legacy SQLite schema migration")
@@ -1169,7 +1169,7 @@ def test_unsupported_signing_key_is_rejected_without_replacing_it(tmp_path):
 def test_one_grant_uses_one_issue_timestamp(client, monkeypatch, request_id):
     import time
 
-    from nomi_auth import accounts
+    from src.services import accounts
 
     create_account(client)
     clock = int(time.time())

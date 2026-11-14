@@ -12,8 +12,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from nomi_auth.db import Database
-from nomi_auth.maintenance import backup_data, cleanup_textures, restore_data
+from src.storage.database import Database
+from src.storage.maintenance import backup_data, cleanup_textures, restore_data
 
 SKIN_HASH = hashlib.sha256(b"skin").hexdigest()
 
@@ -181,7 +181,7 @@ def test_concurrent_cleanup_is_coalesced_and_failure_can_retry(data, monkeypatch
 
 
 def test_backup_remains_consistent_during_concurrent_write(data, tmp_path, monkeypatch):
-    from nomi_auth import maintenance
+    from src.storage import maintenance
 
     entered, release = Event(), Event()
     copy = maintenance.shutil.copyfile

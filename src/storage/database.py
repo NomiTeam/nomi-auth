@@ -4,8 +4,8 @@ from collections.abc import Generator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from .config import Settings
-from .database_types import Connection
+from src.core.config import Settings
+from src.storage.types import Connection
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_versions(version INTEGER PRIMARY KEY);
@@ -62,7 +62,7 @@ class Database:
     def from_settings(cls, settings: Settings) -> "Database":
         if settings.database_backend == "sqlite":
             return cls(settings.data_dir / "nomi-auth.sqlite3")
-        from .mysql import MySQLDatabase
+        from src.storage.mysql import MySQLDatabase
 
         return MySQLDatabase(settings)
 

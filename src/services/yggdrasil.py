@@ -8,13 +8,13 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import FastAPI
 from fastapi.responses import Response
 
-from .accounts import AccountManager
-from .config import Settings
-from .database_types import Connection
-from .db import Database
-from .errors import Problem
-from .models import GameRequest
-from .security import current_timestamp, digest
+from src.core.config import Settings
+from src.core.errors import Problem
+from src.core.models import GameRequest
+from src.core.security import current_timestamp, digest
+from src.services.accounts import AccountManager
+from src.storage.database import Database
+from src.storage.types import Connection
 
 
 class Yggdrasil:
