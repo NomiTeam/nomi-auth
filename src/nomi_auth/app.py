@@ -1,74 +1,24 @@
-import asyncio
 import base64
 import hmac
 import io
 import json
-import logging
 import re
 import secrets
-import sqlite3
-import threading
 import time
 import uuid
-from collections import defaultdict, deque
-from contextlib import asynccontextmanager, suppress
 
-import pymysql
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from fastapi import FastAPI, File, Form, Header, Request, UploadFile
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import FastAPI, File, Form, Header, UploadFile
+from fastapi.responses import FileResponse, Response
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, ConfigDict, Field
 
 from .config import Settings
 from .db import Database
+from .errors import Problem
+from .models import GameRequest, LoginRequest, MemberOperation, Redemption, Registration, Rename
+from .runtime import Runtime
 from .security import code, code_hash, digest, secret
-
-
-class Problem(Exception):
-    def __init__(self, code: str, message: str, status: int = 400):
-        self.code, self.message, self.status = code, message, status
-
-
-class Registration(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(pattern=r"^[A-Za-z0-9_]{3,16}$")
-
-
-class LoginRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class Redemption(BaseModel):
-    code: str = Field(min_length=1, max_length=64)
-    bot_app_id: str = Field(min_length=1, max_length=128)
-    group_openid: str = Field(min_length=1, max_length=128)
-    member_openid: str = Field(min_length=1, max_length=128)
-    event_id: str = Field(min_length=1, max_length=256)
-
-
-class Rename(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(pattern=r"^[A-Za-z0-9_]{3,16}$")
-
-
-class MemberOperation(BaseModel):
-    bot_app_id: str = Field(min_length=1, max_length=128)
-    group_openid: str = Field(min_length=1, max_length=128)
-    member_openid: str = Field(min_length=1, max_length=128)
-    event_id: str = Field(min_length=1, max_length=256)
-    name: str = Field(max_length=64)
-
-
-class GameRequest(BaseModel):
-    username: str = Field(default="", max_length=128)
-    accessToken: str = Field(default="", max_length=256)
-    clientToken: str | None = Field(default=None, max_length=256)
-    selectedProfile: str | dict[str, str] | None = None
-    serverId: str | None = Field(default=None, max_length=256)
-    requestUser: bool = False
 
 
 def now():
@@ -79,92 +29,19 @@ def create_app(settings: Settings | None = None):
     cfg = settings or Settings()
     db = Database.from_settings(cfg)
 
-    @asynccontextmanager
-    async def lifespan(app):
-        async def sweep():
-            next_texture_cleanup = 0
-            while True:
-                try:
-                    await asyncio.to_thread(db.cleanup_if_due, now())
-                    if now() >= next_texture_cleanup:
-                        from .maintenance import cleanup_textures
-                        await asyncio.to_thread(cleanup_textures, db, now())
-                        next_texture_cleanup = now() + 3600
-                except (sqlite3.Error, pymysql.MySQLError, OSError):
-                    logging.getLogger(__name__).exception("Transient data cleanup failed")
-                await asyncio.sleep(30)
-
-        task = asyncio.create_task(sweep())
-        try:
-            yield
-        finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-
-    app = FastAPI(title="Nomi Auth", version="0.1.0", lifespan=lifespan,
-                  docs_url=None, redoc_url=None, openapi_url=None)
+    runtime = Runtime(db)
+    app = FastAPI(
+        title="Nomi Auth",
+        version="0.1.0",
+        lifespan=runtime.lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.db = db
     app.state.settings = cfg
-    limiter = defaultdict(deque)
-    limiter_lock = threading.Lock()
-
-    @app.middleware("http")
-    async def guard(request: Request, call_next):
-        # Single-instance rate limiter. Never trust arbitrary X-Forwarded-For values.
-        sensitive = request.method == "POST" and (
-            request.url.path.startswith("/api/v1/")
-            or request.url.path.endswith(("/authenticate", "/signout"))
-        )
-        key = (request.client.host if request.client else "unknown", "sensitive" if sensitive else "general")
-        limit = 20 if sensitive else 300
-        with limiter_lock:
-            bucket = limiter[key]
-            timestamp = time.monotonic()
-            while bucket and bucket[0] < timestamp - 60:
-                bucket.popleft()
-            blocked = len(bucket) >= limit
-            if not blocked:
-                bucket.append(timestamp)
-            if len(limiter) > 10000:
-                stale = [k for k, v in limiter.items() if not v or v[-1] < timestamp - 60]
-                for k in stale:
-                    del limiter[k]
-        if blocked:
-            return JSONResponse({"code": "RATE_LIMITED", "message": "请求过于频繁"}, 429)
-        # Access-time cleanup also covers expired records when the service was stopped.
-        try:
-            await asyncio.to_thread(db.cleanup_if_due, now())
-        except (sqlite3.Error, pymysql.MySQLError):
-            return JSONResponse({"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503)
-        response = await call_next(request)
-        if not request.url.path.startswith("/textures/"):
-            response.headers["Cache-Control"] = "no-store"
-        return response
-
-    @app.exception_handler(Problem)
-    async def problem_handler(request, exc):
-        if request.url.path.startswith("/api/yggdrasil"):
-            return JSONResponse(
-                {"error": "ForbiddenOperationException", "errorMessage": exc.message}, exc.status
-            )
-        return JSONResponse(
-            {"code": exc.code, "message": exc.message, "request_id": uuid.uuid4().hex}, exc.status
-        )
-
-    @app.exception_handler(pymysql.MySQLError)
-    @app.exception_handler(sqlite3.OperationalError)
-    async def database_error(request, exc):
-        return JSONResponse({"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503)
-
-    @app.exception_handler(RequestValidationError)
-    async def invalid_request(request, exc):
-        if request.url.path.startswith("/api/yggdrasil"):
-            return JSONResponse(
-                {"error": "IllegalArgumentException", "errorMessage": "Invalid request."}, 400
-            )
-        # Never echo validation inputs: they may contain a submitted password.
-        return JSONResponse({"code": "INVALID_REQUEST", "message": "请求格式或参数不符合要求"}, 422)
+    app.middleware("http")(runtime.guard)
+    runtime.install_error_handlers(app)
 
     def bearer(header):
         if not header or not header.startswith("Bearer "):
@@ -858,7 +735,9 @@ def create_app(settings: Settings | None = None):
                     temporary.replace(target)
                 finally:
                     temporary.unlink(missing_ok=True)
-            old = conn.execute("SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)).fetchone()[0]
+            old = conn.execute(
+                "SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)
+            ).fetchone()[0]
             if old and old != texture_hash and (texture_dir / old).is_file():
                 # Retention starts when a texture stops being used, not when it was first uploaded.
                 (texture_dir / old).touch()
@@ -887,7 +766,9 @@ def create_app(settings: Settings | None = None):
     def clear_skin(authorization: str | None = Header(None)):
         with db.write() as conn:
             account = account_for_token(conn, bearer(authorization), "management")
-            old = conn.execute("SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)).fetchone()[0]
+            old = conn.execute(
+                "SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)
+            ).fetchone()[0]
             if old and (texture_dir / old).is_file():
                 (texture_dir / old).touch()
             conn.execute("UPDATE profiles SET skin_hash=NULL WHERE account_id=?", (account["id"],))
@@ -1038,9 +919,7 @@ def install_yggdrasil(app, cfg, db, account_for_token, issue):
             if body.get("selectedProfile") != profile["uuid"]:
                 raise Problem("INVALID_PROFILE", "Invalid token.", 403)
             conn.execute("DELETE FROM joins WHERE profile_id=? AND server_id=?", (profile["uuid"], server_id))
-            conn.execute(
-                "INSERT INTO joins VALUES(?,?,?)", (profile["uuid"], server_id, now() + 30)
-            )
+            conn.execute("INSERT INTO joins VALUES(?,?,?)", (profile["uuid"], server_id, now() + 30))
 
     @app.get(root + "/sessionserver/session/minecraft/hasJoined")
     def has_joined(username: str, serverId: str):
