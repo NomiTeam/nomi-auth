@@ -1,4 +1,3 @@
-import hmac
 import re
 import secrets
 from typing import Any
@@ -7,9 +6,10 @@ from fastapi import FastAPI, Header
 
 from .accounts import AccountManager
 from .config import Settings
+from .database_types import Connection
 from .db import Database
 from .errors import Problem
-from .security import current_timestamp, digest, secret
+from .security import current_timestamp, derive_token, digest, secret
 
 
 class SessionManager:
@@ -17,14 +17,16 @@ class SessionManager:
     Issue rotate and revoke launcher and management sessions.
     """
 
-    def __init__(self, settings: Settings, database: Database, accounts: AccountManager) -> None:
+    def __init__(
+        self, settings: Settings, database: Database, accounts: AccountManager
+    ) -> None:
         self.settings = settings
         self.database = database
         self.accounts = accounts
 
     def issue_session(
         self,
-        connection: Any,
+        connection: Connection,
         record: Any,
         table: str,
         required_status: str,
@@ -39,30 +41,35 @@ class SessionManager:
         if record["expires_at"] <= current_timestamp():
             raise Problem("REQUEST_EXPIRED", "申请已过期，请重新申请")
         if record["session_issued"]:
-            raise Problem("SESSION_ALREADY_ISSUED", "登录凭据已领取，请重新发起群验证", 409)
+            raise Problem(
+                "SESSION_ALREADY_ISSUED", "登录凭据已领取，请重新发起群验证", 409
+            )
         account = connection.execute(
-            "SELECT * FROM accounts WHERE id=? AND status='active'", (record["account_id"],)
+            "SELECT * FROM accounts WHERE id=? AND status='active'",
+            (record["account_id"],),
         ).fetchone()
         if not account:
             raise Problem("ACCOUNT_UNAVAILABLE", "账号不可用", 403)
+        if retry_key is not None and poll_token is None:
+            raise ValueError("A retryable login requires its private polling token")
         client_token = secret()
         nonce = secret()
 
-        def value(kind):
-            return (
-                hmac.digest(poll_token.encode(), f"{retry_key}:{nonce}:{kind}".encode(), "sha256").hex()
-                if retry_key
-                else None
-            )
+        def login_token(kind: str) -> str | None:
+            if retry_key is None or poll_token is None:
+                return None
+            return derive_token(poll_token, retry_key, nonce, kind)
 
-        game_token = self.accounts.issue_token(connection, account["id"], "game", client_token, value("game"))
+        game_token = self.accounts.issue_token(
+            connection, account["id"], "game", client_token, login_token("game")
+        )
         management_token = self.accounts.issue_token(
-            connection, account["id"], "management", token=value("management")
+            connection, account["id"], "management", token=login_token("management")
         )
         refresh_token = self.accounts.issue_token(
-            connection, account["id"], "refresh", client_token, value("refresh")
+            connection, account["id"], "refresh", client_token, login_token("refresh")
         )
-        if retry_key:
+        if retry_key and poll_token is not None:
             connection.execute(
                 "INSERT INTO login_retries VALUES(?,?,?,?,?,?,?,?)",
                 (
@@ -79,11 +86,15 @@ class SessionManager:
         # A completed request cannot issue another independent session.
         connection.execute(f"DELETE FROM {table} WHERE id=?", (record["id"],))
         self.accounts.record_audit(connection, "qq_session_issued", account["id"])
-        result = self.format_session(connection, account, client_token, game_token, refresh_token)
+        result = self.format_session(
+            connection, account, client_token, game_token, refresh_token
+        )
         result["management_token"] = management_token
         return result
 
-    def current_profile(self, authorization: str | None = Header(None)) -> dict[str, Any]:
+    def current_profile(
+        self, authorization: str | None = Header(None)
+    ) -> dict[str, Any]:
         """
         Return the current name and UUID for a game token.
         """
@@ -97,89 +108,134 @@ class SessionManager:
             return {"id": profile["uuid"], "name": profile["name"]}
 
     def refresh(
-        self, authorization: str | None = Header(None), x_request_id: str | None = Header(None)
+        self,
+        authorization: str | None = Header(None),
+        x_request_id: str | None = Header(None),
     ) -> dict[str, Any]:
         """
-        Rotate device credentials, preserving bounded retries after response loss.
+        Rotate one device session, or replay a matching grant after response loss.
         """
         token = self.accounts.read_bearer(authorization)
-        if x_request_id is not None and (not re.fullmatch("[a-f0-9]{64}", x_request_id)):
+        if x_request_id is not None and not re.fullmatch(r"[a-f0-9]{64}", x_request_id):
             raise Problem("INVALID_REQUEST", "无效的续期请求标识", 422)
 
-        def derived(nonce, kind):
-            return hmac.digest(token.encode(), f"{x_request_id}:{nonce}:{kind}".encode(), "sha256").hex()
-
         with self.database.write() as connection:
-            retry = connection.execute(
-                "SELECT * FROM refresh_retries WHERE old_hash=? AND expires_at>?",
-                (digest(token), current_timestamp()),
-            ).fetchone()
-            if retry and x_request_id and secrets.compare_digest(retry["request_hash"], digest(x_request_id)):
-                account = self.accounts.find_token_account(
-                    connection, derived(retry["nonce"], "refresh"), "refresh"
-                )
-                stored_token = connection.execute(
-                    "SELECT * FROM tokens WHERE hash=?", (retry["refresh_hash"],)
-                ).fetchone()
-                access = derived(retry["nonce"], "game")
-                refresh = derived(retry["nonce"], "refresh")
-                return self.format_session(connection, account, stored_token["client_token"], access, refresh)
+            previous_result = self._retry_refresh(connection, token, x_request_id)
+            if previous_result is not None:
+                return previous_result
+
             account = self.accounts.find_token_account(connection, token, "refresh")
             stored_token = connection.execute(
                 "SELECT * FROM tokens WHERE hash=?", (digest(token),)
             ).fetchone()
-            connection.execute(
-                "DELETE FROM tokens WHERE hash=? OR (account_id=? AND kind='game' AND client_token=?)",
-                (digest(token), account["id"], stored_token["client_token"]),
+            client_token = stored_token["client_token"]
+            self._remove_device_tokens(connection, account["id"], token, client_token)
+            access_token, refresh_token = self._issue_refresh_tokens(
+                connection, account["id"], client_token, token, x_request_id
             )
-            if x_request_id:
-                nonce = secret()
-                access, refresh = (derived(nonce, "game"), derived(nonce, "refresh"))
-                for value, kind, ttl in (
-                    (access, "game", self.settings.game_token_ttl),
-                    (refresh, "refresh", self.settings.refresh_token_ttl),
-                ):
-                    connection.execute(
-                        "INSERT INTO tokens VALUES(?,?,?,?,?)",
-                        (
-                            digest(value),
-                            account["id"],
-                            kind,
-                            stored_token["client_token"],
-                            current_timestamp() + ttl,
-                        ),
-                    )
-                connection.execute(
-                    "INSERT INTO refresh_retries VALUES(?,?,?,?,?,?)",
-                    (
-                        digest(token),
-                        digest(x_request_id),
-                        nonce,
-                        digest(access),
-                        digest(refresh),
-                        current_timestamp() + 120,
-                    ),
-                )
-            else:
-                access = self.accounts.issue_token(
-                    connection, account["id"], "game", stored_token["client_token"]
-                )
-                refresh = self.accounts.issue_token(
-                    connection, account["id"], "refresh", stored_token["client_token"]
-                )
-            return self.format_session(connection, account, stored_token["client_token"], access, refresh)
+            return self.format_session(
+                connection, account, client_token, access_token, refresh_token
+            )
+
+    def _retry_refresh(
+        self, connection: Connection, token: str, request_id: str | None
+    ) -> dict[str, Any] | None:
+        if request_id is None:
+            return None
+        retry = connection.execute(
+            "SELECT * FROM refresh_retries WHERE old_hash=? AND expires_at>?",
+            (digest(token), current_timestamp()),
+        ).fetchone()
+        if retry is None or not secrets.compare_digest(
+            retry["request_hash"], digest(request_id)
+        ):
+            return None
+
+        access_token = derive_token(token, request_id, retry["nonce"], "game")
+        refresh_token = derive_token(token, request_id, retry["nonce"], "refresh")
+        account = self.accounts.find_token_account(connection, refresh_token, "refresh")
+        stored_token = connection.execute(
+            "SELECT * FROM tokens WHERE hash=?", (retry["refresh_hash"],)
+        ).fetchone()
+        # Read the original expiry times rather than extending a retried session.
+        return self.format_session(
+            connection,
+            account,
+            stored_token["client_token"],
+            access_token,
+            refresh_token,
+        )
+
+    def _remove_device_tokens(
+        self,
+        connection: Connection,
+        account_id: str,
+        token: str,
+        client_token: str | None,
+    ) -> None:
+        connection.execute(
+            "DELETE FROM tokens WHERE hash=? OR (account_id=? AND kind='game' AND client_token=?)",
+            (digest(token), account_id, client_token),
+        )
+
+    def _issue_refresh_tokens(
+        self,
+        connection: Connection,
+        account_id: str,
+        client_token: str | None,
+        previous_token: str,
+        request_id: str | None,
+    ) -> tuple[str, str]:
+        if request_id is None:
+            access_token = self.accounts.issue_token(
+                connection, account_id, "game", client_token
+            )
+            refresh_token = self.accounts.issue_token(
+                connection, account_id, "refresh", client_token
+            )
+            return access_token, refresh_token
+
+        nonce = secret()
+        access_token = derive_token(previous_token, request_id, nonce, "game")
+        refresh_token = derive_token(previous_token, request_id, nonce, "refresh")
+        self.accounts.issue_token(
+            connection, account_id, "game", client_token, access_token
+        )
+        self.accounts.issue_token(
+            connection, account_id, "refresh", client_token, refresh_token
+        )
+        connection.execute(
+            "INSERT INTO refresh_retries VALUES(?,?,?,?,?,?)",
+            (
+                digest(previous_token),
+                digest(request_id),
+                nonce,
+                digest(access_token),
+                digest(refresh_token),
+                current_timestamp() + 120,
+            ),
+        )
+        return access_token, refresh_token
 
     def format_session(
-        self, connection: Any, account: Any, client_token: str | None, access: str, refresh: str
+        self,
+        connection: Connection,
+        account: Any,
+        client_token: str | None,
+        access: str,
+        refresh: str,
     ) -> dict[str, Any]:
         """
         Build the launcher response using the stored token expiry times.
         """
-        profile = connection.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
+        profile = connection.execute(
+            "SELECT * FROM profiles WHERE account_id=?", (account["id"],)
+        ).fetchone()
         expiries = {
             r["kind"]: r["expires_at"]
             for r in connection.execute(
-                "SELECT kind,expires_at FROM tokens WHERE hash IN (?,?)", (digest(access), digest(refresh))
+                "SELECT kind,expires_at FROM tokens WHERE hash IN (?,?)",
+                (digest(access), digest(refresh)),
             )
         }
         selected_profile = {"id": profile["uuid"], "name": profile["name"]}
@@ -230,7 +286,9 @@ class SessionManager:
                 connection, self.accounts.read_bearer(authorization), "management"
             )
             profile = dict(
-                connection.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
+                connection.execute(
+                    "SELECT * FROM profiles WHERE account_id=?", (account["id"],)
+                ).fetchone()
             )
         return {"login_name": account["login_name"], "profile": profile}
 
@@ -240,6 +298,10 @@ class SessionManager:
         """
         app.get("/api/v1/game/profile", response_model=None)(self.current_profile)
         app.post("/api/v1/sessions/refresh", response_model=None)(self.refresh)
-        app.delete("/api/v1/sessions/refresh", status_code=204, response_model=None)(self.revoke)
-        app.delete("/api/v1/sessions/current", status_code=204, response_model=None)(self.logout)
+        app.delete("/api/v1/sessions/refresh", status_code=204, response_model=None)(
+            self.revoke
+        )
+        app.delete("/api/v1/sessions/current", status_code=204, response_model=None)(
+            self.logout
+        )
         app.get("/api/v1/me", response_model=None)(self.me)

@@ -2,8 +2,8 @@
 
 import hashlib
 import threading
-from collections.abc import Mapping
-from contextlib import contextmanager
+from collections.abc import Generator, Mapping
+from contextlib import closing, contextmanager
 
 import pymysql
 
@@ -129,27 +129,40 @@ class MySQLDatabase(Database):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._cleanup_lock = threading.Lock()
         self._last_cleanup = None
-        self.lock_name = "nomi-auth:" + hashlib.sha256(settings.mysql_database.encode()).hexdigest()[:48]
+        self.lock_name = (
+            "nomi-auth:"
+            + hashlib.sha256(settings.mysql_database.encode()).hexdigest()[:48]
+        )
         with self.write() as conn:
             tables = {row[0] for row in conn.execute("SHOW TABLES")}
             if "schema_versions" in tables:
-                versions = [row[0] for row in conn.execute("SELECT version FROM schema_versions")]
+                versions = [
+                    row[0]
+                    for row in conn.execute("SELECT version FROM schema_versions")
+                ]
                 if versions and max(versions) != 5:
                     raise RuntimeError("Unsupported MySQL database schema")
             elif tables:
-                raise RuntimeError("MySQL destination must be a dedicated empty database")
+                raise RuntimeError(
+                    "MySQL destination must be a dedicated empty database"
+                )
             # DDL implicitly commits on MySQL; the connection-scoped lock still holds.
             for statement in MYSQL_SCHEMA.split(";"):
                 if statement.strip():
-                    conn.execute(statement + " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin")
-            versions = [row[0] for row in conn.execute("SELECT version FROM schema_versions")]
+                    conn.execute(
+                        statement
+                        + " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
+                    )
+            versions = [
+                row[0] for row in conn.execute("SELECT version FROM schema_versions")
+            ]
             if versions and max(versions) != 5:
                 raise RuntimeError("Unsupported MySQL database schema")
             if not versions:
                 for version in (2, 3, 4, 5):
                     conn.execute("INSERT INTO schema_versions VALUES(?)", (version,))
 
-    def connect(self):
+    def connect(self) -> Connection:
         cfg = self.settings
         raw = pymysql.connect(
             host=cfg.mysql_host,
@@ -171,13 +184,16 @@ class MySQLDatabase(Database):
         return Connection(raw)
 
     @contextmanager
-    def write(self):
-        with self.read() as conn:
-            locked = conn.execute(
-                "SELECT GET_LOCK(?, ?)", (self.lock_name, self.settings.database_timeout)
-            ).fetchone()[0]
-            if locked != 1:
-                raise pymysql.OperationalError(1205, "Timed out waiting for Nomi database writer")
+    def write(self) -> Generator[Connection, None, None]:
+        with closing(self.connect()) as conn:
+            lock_result = conn.execute(
+                "SELECT GET_LOCK(?, ?)",
+                (self.lock_name, self.settings.database_timeout),
+            ).fetchone()
+            if lock_result is None or lock_result[0] != 1:
+                raise pymysql.OperationalError(
+                    1205, "Timed out waiting for Nomi database writer"
+                )
             # The read context closes this connection, releasing the advisory lock on every exit.
             conn.raw.begin()
             try:

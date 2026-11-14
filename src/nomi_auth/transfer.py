@@ -73,19 +73,26 @@ def import_sqlite(source_path: Path, target: Database):
                     table != "schema_versions"
                     and destination.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
                 ):
-                    raise ValueError("Destination database is not empty; refusing to overwrite")
+                    raise ValueError(
+                        "Destination database is not empty; refusing to overwrite"
+                    )
             destination.execute("DELETE FROM schema_versions")
             counts = copy_rows(source, destination)
             for table, count in counts.items():
-                if destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] != count:
+                if (
+                    destination.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    != count
+                ):
                     raise ValueError("Imported row counts do not match")
                 # Compare every field as well as counts, including credentials and UUIDs.
                 columns = [r[1] for r in source.execute(f"PRAGMA table_info({table})")]
                 expected = sorted(
-                    tuple(r[name] for name in columns) for r in source.execute(f"SELECT * FROM {table}")
+                    tuple(r[name] for name in columns)
+                    for r in source.execute(f"SELECT * FROM {table}")
                 )
                 actual = sorted(
-                    tuple(r[name] for name in columns) for r in destination.execute(f"SELECT * FROM {table}")
+                    tuple(r[name] for name in columns)
+                    for r in destination.execute(f"SELECT * FROM {table}")
                 )
                 if expected != actual:
                     raise ValueError("Imported data differs from source")

@@ -26,10 +26,17 @@ def mysql_settings(database_settings):
 
 
 def test_backend_configuration_is_explicit_and_password_is_redacted(tmp_path):
-    values = {"data_dir": tmp_path, "bot_token": "x" * 32, "bot_app_id": "app", "group_openid": "group"}
+    values = {
+        "data_dir": tmp_path,
+        "bot_token": "x" * 32,
+        "bot_app_id": "app",
+        "group_openid": "group",
+    }
     assert Settings(**values).database_backend == "sqlite"
     assert Settings(**values, database_backend="mariadb").database_backend == "mariadb"
-    assert "very-private-password" not in repr(Settings(**values, mysql_password="very-private-password"))
+    assert "very-private-password" not in repr(
+        Settings(**values, mysql_password="very-private-password")
+    )
     with pytest.raises(ValidationError):
         Settings(**values, database_backend="other")
     with pytest.raises(ValidationError):
@@ -62,19 +69,25 @@ def test_writer_lock_and_rollback_across_instances(mysql_settings):
 
     with ThreadPoolExecutor(1) as executor:
         with pytest.raises(RuntimeError, match="rollback"), first.write() as conn:
-            conn.execute("INSERT INTO accounts VALUES('first','Alice','alice','active',1)")
+            conn.execute(
+                "INSERT INTO accounts VALUES('first','Alice','alice','active',1)"
+            )
             future = executor.submit(writer)
             assert entered.wait(2)
             assert not future.done()
             with second.read() as reader:
-                assert reader.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0
+                assert (
+                    reader.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0
+                )
             raise RuntimeError("rollback")
         future.result(timeout=5)
     with first.read() as conn:
         assert conn.execute("SELECT id FROM accounts").fetchone()[0] == "second"
 
 
-def test_sqlite_migration_preserves_sessions_key_and_every_row(mysql_settings, tmp_path):
+def test_sqlite_migration_preserves_sessions_key_and_every_row(
+    mysql_settings, tmp_path
+):
     source_cfg = mysql_settings.model_copy(
         update={"database_backend": "sqlite", "data_dir": tmp_path / "original"}
     )
@@ -97,7 +110,12 @@ def test_sqlite_migration_preserves_sessions_key_and_every_row(mysql_settings, t
     with pytest.raises(ValueError, match="not empty"):
         import_sqlite(source_file, target)
     migrated = TestClient(create_app(target_cfg))
-    assert migrated.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 204
+    assert (
+        migrated.post(
+            "/api/yggdrasil/authserver/validate", json=session["game"]
+        ).status_code
+        == 204
+    )
     assert (
         login(migrated, event="after-migration")["game"]["selectedProfile"]
         == session["game"]["selectedProfile"]
@@ -120,7 +138,9 @@ def test_sqlite_migration_preserves_sessions_key_and_every_row(mysql_settings, t
 def test_import_failure_rolls_back_all_tables(mysql_settings, tmp_path):
     source = Database(tmp_path / "source.sqlite3")
     with source.write() as conn:
-        conn.execute("INSERT INTO accounts VALUES('account','Alice','alice','active',1)")
+        conn.execute(
+            "INSERT INTO accounts VALUES('account','Alice','alice','active',1)"
+        )
         # Deliberately exceed MySQL's supported identifier size after an account was copied.
         conn.execute(
             "INSERT INTO profiles(uuid,account_id,name,name_normalized) VALUES(?,?,?,?)",
@@ -133,10 +153,14 @@ def test_import_failure_rolls_back_all_tables(mysql_settings, tmp_path):
         for table in TABLES:
             if table != "schema_versions":
                 assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
-        assert conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0] == 5
+        assert (
+            conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0] == 5
+        )
 
 
-def test_connection_failure_returns_503_without_credentials(mysql_settings, monkeypatch):
+def test_connection_failure_returns_503_without_credentials(
+    mysql_settings, monkeypatch
+):
     app = create_app(mysql_settings)
 
     def unavailable():
@@ -150,13 +174,21 @@ def test_connection_failure_returns_503_without_credentials(mysql_settings, monk
 
 
 def test_mariadb_alias_and_writer_timeout_release(mysql_settings):
-    cfg = mysql_settings.model_copy(update={"database_backend": "mariadb", "database_timeout": 1})
+    cfg = mysql_settings.model_copy(
+        update={"database_backend": "mariadb", "database_timeout": 1}
+    )
     first = Database.from_settings(mysql_settings)
     second = Database.from_settings(cfg)
-    with first.write(), pytest.raises(pymysql.OperationalError, match="writer"), second.write():
+    with (
+        first.write(),
+        pytest.raises(pymysql.OperationalError, match="writer"),
+        second.write(),
+    ):
         pytest.fail("Concurrent writer acquired the lock")
     with second.write() as conn:
-        conn.execute("INSERT INTO accounts VALUES('after-timeout','Bob','bob','active',1)")
+        conn.execute(
+            "INSERT INTO accounts VALUES('after-timeout','Bob','bob','active',1)"
+        )
     assert TestClient(create_app(cfg)).get("/health").status_code == 200
 
 
@@ -168,7 +200,10 @@ def test_newer_schema_is_rejected_without_changing_it(mysql_settings):
         with pytest.raises(RuntimeError, match="Unsupported"):
             Database.from_settings(mysql_settings)
         with db.read() as conn:
-            assert conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0] == 6
+            assert (
+                conn.execute("SELECT MAX(version) FROM schema_versions").fetchone()[0]
+                == 6
+            )
     finally:
         with db.write() as conn:
             conn.execute("DELETE FROM schema_versions WHERE version=6")
@@ -246,12 +281,23 @@ def test_cli_migration_backup_disable_and_cleanup(mysql_settings, tmp_path):
         assert result.returncode == 0, result.stderr
         return result.stdout
 
-    assert "Migration verified" in command("migrate-database", str(source_cfg.data_dir / "nomi-auth.sqlite3"))
+    assert "Migration verified" in command(
+        "migrate-database", str(source_cfg.data_dir / "nomi-auth.sqlite3")
+    )
     archive = tmp_path / "cli-backup.tar.gz"
     assert "snapshot" in command("backup", str(archive))
-    assert "Restored" in command("restore", str(archive), str(tmp_path / "cli-restored"))
+    assert "Restored" in command(
+        "restore", str(archive), str(tmp_path / "cli-restored")
+    )
     assert "disabled" in command("disable", "Alice")
-    target = TestClient(create_app(mysql_settings.model_copy(update={"data_dir": source_cfg.data_dir})))
-    assert target.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 403
+    target = TestClient(
+        create_app(mysql_settings.model_copy(update={"data_dir": source_cfg.data_dir}))
+    )
+    assert (
+        target.post(
+            "/api/yggdrasil/authserver/validate", json=session["game"]
+        ).status_code
+        == 403
+    )
     assert "active" in command("enable", "Alice")
     assert "Expired" in command("cleanup")

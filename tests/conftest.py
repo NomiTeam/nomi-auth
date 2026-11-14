@@ -9,14 +9,23 @@ from nomi_auth.transfer import TABLES
 
 @pytest.fixture(params=["sqlite", "mysql"])
 def database_settings(request, tmp_path):
-    options = {"data_dir": tmp_path, "bot_token": "x" * 32, "bot_app_id": "app", "group_openid": "group"}
+    options = {
+        "data_dir": tmp_path,
+        "bot_token": "x" * 32,
+        "bot_app_id": "app",
+        "group_openid": "group",
+    }
     if request.param == "sqlite":
         return Settings(**options, database_backend="sqlite")
     name = os.environ.get("NOMI_TEST_MYSQL_DATABASE")
     if not name:
-        pytest.skip("Set NOMI_TEST_MYSQL_DATABASE to run real MySQL/MariaDB integration tests")
+        pytest.skip(
+            "Set NOMI_TEST_MYSQL_DATABASE to run real MySQL/MariaDB integration tests"
+        )
     if not name.startswith("nomi_auth_test_"):
-        pytest.fail("Refusing to run destructive tests outside an isolated nomi_auth_test_* database")
+        pytest.fail(
+            "Refusing to run destructive tests outside an isolated nomi_auth_test_* database"
+        )
     cfg = Settings(
         **options,
         database_backend="mysql",

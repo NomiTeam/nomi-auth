@@ -1,7 +1,10 @@
 import sqlite3
 import threading
-from contextlib import contextmanager
+from collections.abc import Generator
+from contextlib import closing, contextmanager
 from pathlib import Path
+
+from .database_types import Connection
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_versions(version INTEGER PRIMARY KEY);
@@ -65,14 +68,16 @@ class Database:
     def __init__(self, path: Path):
         self.path = path
         self._cleanup_lock = threading.Lock()
-        self._last_cleanup = None
+        self._last_cleanup: int | None = None
         path.parent.mkdir(parents=True, exist_ok=True)
-        with self.read() as conn:
+        with closing(self._connect_sqlite()) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
         # v2 removes password storage while preserving accounts, identities and UUIDs.
         with self.write() as conn:
-            versions = [r[0] for r in conn.execute("SELECT version FROM schema_versions")]
+            versions = [
+                r[0] for r in conn.execute("SELECT version FROM schema_versions")
+            ]
             if versions and max(versions) > 5:
                 raise RuntimeError("Database schema is newer than this application")
             for table in ("accounts", "registrations"):
@@ -97,17 +102,28 @@ class Database:
             conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(3)")
             columns = {r[1] for r in conn.execute("PRAGMA table_info(receipts)")}
             if "created_at" not in columns:
-                conn.execute("ALTER TABLE receipts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
-                conn.execute("UPDATE receipts SET created_at=unixepoch() WHERE created_at=0")
-            conn.execute("CREATE INDEX IF NOT EXISTS receipt_created ON receipts(created_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS audit_created ON audit(created_at)")
+                conn.execute(
+                    "ALTER TABLE receipts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
+                )
+                conn.execute(
+                    "UPDATE receipts SET created_at=unixepoch() WHERE created_at=0"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS receipt_created ON receipts(created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS audit_created ON audit(created_at)"
+            )
             conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(4)")
             conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(5)")
 
     def cleanup_if_due(self, timestamp: int):
         """Coalesce concurrent maintenance requests; failures remain eligible for retry."""
         with self._cleanup_lock:
-            if self._last_cleanup is not None and 0 <= timestamp - self._last_cleanup < 30:
+            if (
+                self._last_cleanup is not None
+                and 0 <= timestamp - self._last_cleanup < 30
+            ):
                 return
             self.cleanup(timestamp)
             self._last_cleanup = timestamp
@@ -125,11 +141,18 @@ class Database:
             ):
                 conn.execute(f"DELETE FROM {table} WHERE expires_at<=?", (timestamp,))
             for table in ("registrations", "login_requests"):
-                conn.execute(f"DELETE FROM {table} WHERE status='CANCELLED' OR session_issued=1")
+                conn.execute(
+                    f"DELETE FROM {table} WHERE status='CANCELLED' OR session_issued=1"
+                )
             for table in ("receipts", "audit"):
-                conn.execute(f"DELETE FROM {table} WHERE created_at<=?", (timestamp - 86400,))
+                conn.execute(
+                    f"DELETE FROM {table} WHERE created_at<=?", (timestamp - 86400,)
+                )
 
-    def connect(self):
+    def connect(self) -> Connection:
+        return self._connect_sqlite()
+
+    def _connect_sqlite(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
@@ -137,7 +160,7 @@ class Database:
         return conn
 
     @contextmanager
-    def read(self):
+    def read(self) -> Generator[Connection, None, None]:
         conn = self.connect()
         try:
             yield conn
@@ -145,7 +168,7 @@ class Database:
             conn.close()
 
     @contextmanager
-    def write(self):
+    def write(self) -> Generator[Connection, None, None]:
         with self.read() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:

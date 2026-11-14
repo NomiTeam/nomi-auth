@@ -10,6 +10,7 @@ from fastapi.responses import Response
 
 from .accounts import AccountManager
 from .config import Settings
+from .database_types import Connection
 from .db import Database
 from .errors import Problem
 from .models import GameRequest
@@ -21,7 +22,9 @@ class Yggdrasil:
     Implement game authentication using the same account and token rules.
     """
 
-    def __init__(self, settings: Settings, database: Database, accounts: AccountManager) -> None:
+    def __init__(
+        self, settings: Settings, database: Database, accounts: AccountManager
+    ) -> None:
         self.settings = settings
         self.database = database
         self.accounts = accounts
@@ -41,9 +44,14 @@ class Yggdrasil:
                 key_path.chmod(384)
             except FileExistsError:
                 pass
-        self.key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+        if not isinstance(key, rsa.RSAPrivateKey):
+            raise TypeError("Texture signing key must be RSA")
+        self.key = key
 
-    def profile_response(self, record: Any, properties: bool = False, signed: bool = False) -> dict[str, Any]:
+    def profile_response(
+        self, record: Any, properties: bool = False, signed: bool = False
+    ) -> dict[str, Any]:
         """
         Build a game profile and optionally include signed texture properties.
         """
@@ -71,19 +79,31 @@ class Yggdrasil:
                 texture_property["signature"] = base64.b64encode(
                     self.key.sign(value.encode(), padding.PKCS1v15(), hashes.SHA1())
                 ).decode()
-            result["properties"] = [texture_property, {"name": "uploadableTextures", "value": "skin"}]
+            result["properties"] = [
+                texture_property,
+                {"name": "uploadableTextures", "value": "skin"},
+            ]
         return result
 
-    def token_and_profile(self, connection: Any, request_data: Any) -> tuple[Any, Any, Any]:
+    def token_and_profile(
+        self, connection: Connection, request_data: Any
+    ) -> tuple[Any, Any, Any]:
         """
         Validate game credentials and resolve the owning profile.
         """
         token = request_data.get("accessToken", "")
         account = self.accounts.find_token_account(connection, token, "game")
-        stored_token = connection.execute("SELECT * FROM tokens WHERE hash=?", (digest(token),)).fetchone()
-        if "clientToken" in request_data and request_data["clientToken"] != stored_token["client_token"]:
+        stored_token = connection.execute(
+            "SELECT * FROM tokens WHERE hash=?", (digest(token),)
+        ).fetchone()
+        if (
+            "clientToken" in request_data
+            and request_data["clientToken"] != stored_token["client_token"]
+        ):
             raise Problem("INVALID_TOKEN", "Invalid token.", 403)
-        profile = connection.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
+        profile = connection.execute(
+            "SELECT * FROM profiles WHERE account_id=?", (account["id"],)
+        ).fetchone()
         return (account, stored_token, profile)
 
     def metadata(self) -> dict[str, Any]:
@@ -116,22 +136,27 @@ class Yggdrasil:
         """
         Rotate a game token while retaining its client token.
         """
-        request_data = request_data.model_dump(exclude_none=True)
+        fields = request_data.model_dump(exclude_none=True)
         with self.database.write() as connection:
-            account, stored_token, profile = self.token_and_profile(connection, request_data)
-            selected_profile = request_data.get("selectedProfile")
+            account, stored_token, profile = self.token_and_profile(connection, fields)
+            selected_profile = fields.get("selectedProfile")
             if selected_profile and (
-                not isinstance(selected_profile, dict) or selected_profile.get("id") != profile["uuid"]
+                not isinstance(selected_profile, dict)
+                or selected_profile.get("id") != profile["uuid"]
             ):
                 raise Problem("INVALID_PROFILE", "Invalid profile.", 403)
-            connection.execute("DELETE FROM tokens WHERE hash=?", (stored_token["hash"],))
-            token = self.accounts.issue_token(connection, account["id"], "game", stored_token["client_token"])
+            connection.execute(
+                "DELETE FROM tokens WHERE hash=?", (stored_token["hash"],)
+            )
+            token = self.accounts.issue_token(
+                connection, account["id"], "game", stored_token["client_token"]
+            )
         result = {
             "accessToken": token,
             "clientToken": stored_token["client_token"],
             "selectedProfile": self.profile_response(profile),
         }
-        if request_data.get("requestUser"):
+        if fields.get("requestUser"):
             result["user"] = {"id": account["id"], "properties": []}
         return result
 
@@ -139,22 +164,23 @@ class Yggdrasil:
         """
         Check that the game token belongs to an active account.
         """
-        request_data = request_data.model_dump(exclude_none=True)
+        fields = request_data.model_dump(exclude_none=True)
         with self.database.read() as connection:
-            self.token_and_profile(connection, request_data)
+            self.token_and_profile(connection, fields)
 
     def game_invalidate(self, request_data: GameRequest) -> None:
         """
         Revoke a matching game token without revealing whether it existed.
         """
-        request_data = request_data.model_dump(exclude_none=True)
+        fields = request_data.model_dump(exclude_none=True)
         with self.database.write() as connection:
             record = connection.execute(
                 "SELECT * FROM tokens WHERE hash=? AND kind='game'",
-                (digest(request_data.get("accessToken", "")),),
+                (digest(fields.get("accessToken", "")),),
             ).fetchone()
             if record and (
-                "clientToken" not in request_data or record["client_token"] == request_data["clientToken"]
+                "clientToken" not in fields
+                or record["client_token"] == fields["clientToken"]
             ):
                 connection.execute("DELETE FROM tokens WHERE hash=?", (record["hash"],))
 
@@ -162,19 +188,21 @@ class Yggdrasil:
         """
         Authorize a matching profile to join one server for thirty seconds.
         """
-        request_data = request_data.model_dump(exclude_none=True)
-        server_id = request_data.get("serverId")
+        fields = request_data.model_dump(exclude_none=True)
+        server_id = fields.get("serverId")
         if not isinstance(server_id, str) or not 1 <= len(server_id) <= 256:
             raise Problem("INVALID_SESSION", "Invalid server ID.")
         with self.database.write() as connection:
-            _, _, profile = self.token_and_profile(connection, request_data)
-            if request_data.get("selectedProfile") != profile["uuid"]:
+            _, _, profile = self.token_and_profile(connection, fields)
+            if fields.get("selectedProfile") != profile["uuid"]:
                 raise Problem("INVALID_PROFILE", "Invalid token.", 403)
             connection.execute(
-                "DELETE FROM joins WHERE profile_id=? AND server_id=?", (profile["uuid"], server_id)
+                "DELETE FROM joins WHERE profile_id=? AND server_id=?",
+                (profile["uuid"], server_id),
             )
             connection.execute(
-                "INSERT INTO joins VALUES(?,?,?)", (profile["uuid"], server_id, current_timestamp() + 30)
+                "INSERT INTO joins VALUES(?,?,?)",
+                (profile["uuid"], server_id, current_timestamp() + 30),
             )
 
     def has_joined(self, username: str, serverId: str) -> Any:
@@ -186,7 +214,11 @@ class Yggdrasil:
                 "SELECT p.* FROM profiles p JOIN joins j ON p.uuid=j.profile_id\n                JOIN accounts a ON a.id=p.account_id WHERE p.name_normalized=? AND j.server_id=?\n                AND j.expires_at>? AND a.status='active'",
                 (username.lower(), serverId, current_timestamp()),
             ).fetchone()
-        return self.profile_response(record, True, True) if record else Response(status_code=204)
+        return (
+            self.profile_response(record, True, True)
+            if record
+            else Response(status_code=204)
+        )
 
     def get_profile(self, profile_id: str, unsigned: bool = True) -> Any:
         """
@@ -201,7 +233,11 @@ class Yggdrasil:
                 "SELECT p.* FROM profiles p JOIN accounts a ON a.id=p.account_id WHERE uuid=? AND a.status='active'",
                 (profile_id,),
             ).fetchone()
-        return self.profile_response(record, True, not unsigned) if record else Response(status_code=204)
+        return (
+            self.profile_response(record, True, not unsigned)
+            if record
+            else Response(status_code=204)
+        )
 
     def profiles(self, names: list[str]) -> list[dict[str, Any]]:
         """
@@ -226,20 +262,34 @@ class Yggdrasil:
         """
         app.get(self.root + "/", response_model=None)(self.metadata)
         app.get("/api/yggdrasil", response_model=None)(self.metadata)
-        app.post(self.root + "/authserver/authenticate", response_model=None)(self.legacy_auth_disabled)
-        app.post(self.root + "/authserver/signout", response_model=None)(self.legacy_auth_disabled)
-        app.post(self.root + "/authserver/refresh", response_model=None)(self.game_refresh)
-        app.post(self.root + "/authserver/validate", status_code=204, response_model=None)(self.game_validate)
-        app.post(self.root + "/authserver/invalidate", status_code=204, response_model=None)(
-            self.game_invalidate
+        app.post(self.root + "/authserver/authenticate", response_model=None)(
+            self.legacy_auth_disabled
         )
-        app.post(self.root + "/sessionserver/session/minecraft/join", status_code=204, response_model=None)(
-            self.join
+        app.post(self.root + "/authserver/signout", response_model=None)(
+            self.legacy_auth_disabled
         )
-        app.get(self.root + "/sessionserver/session/minecraft/hasJoined", response_model=None)(
-            self.has_joined
+        app.post(self.root + "/authserver/refresh", response_model=None)(
+            self.game_refresh
         )
-        app.get(self.root + "/sessionserver/session/minecraft/profile/{profile_id}", response_model=None)(
-            self.get_profile
+        app.post(
+            self.root + "/authserver/validate", status_code=204, response_model=None
+        )(self.game_validate)
+        app.post(
+            self.root + "/authserver/invalidate", status_code=204, response_model=None
+        )(self.game_invalidate)
+        app.post(
+            self.root + "/sessionserver/session/minecraft/join",
+            status_code=204,
+            response_model=None,
+        )(self.join)
+        app.get(
+            self.root + "/sessionserver/session/minecraft/hasJoined",
+            response_model=None,
+        )(self.has_joined)
+        app.get(
+            self.root + "/sessionserver/session/minecraft/profile/{profile_id}",
+            response_model=None,
+        )(self.get_profile)
+        app.post(self.root + "/api/profiles/minecraft", response_model=None)(
+            self.profiles
         )
-        app.post(self.root + "/api/profiles/minecraft", response_model=None)(self.profiles)

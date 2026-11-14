@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 from .config import Settings
+from .database_types import Connection
 from .db import Database
 from .errors import Problem
 from .models import MemberOperation, Redemption
@@ -17,7 +18,12 @@ class ReceiptManager:
         self.settings = settings
         self.database = database
 
-    def find(self, connection: Any, request_data: Redemption | MemberOperation, operation: str) -> Any:
+    def find(
+        self,
+        connection: Connection,
+        request_data: Redemption | MemberOperation,
+        operation: str,
+    ) -> Any:
         """
         Return a saved operation result or reject a changed event payload.
         """
@@ -33,7 +39,7 @@ class ReceiptManager:
 
     def save(
         self,
-        connection: Any,
+        connection: Connection,
         request_data: Redemption | MemberOperation,
         operation: str,
         result: dict[str, Any],

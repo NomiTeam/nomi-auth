@@ -23,7 +23,9 @@ def main():
     enable.add_argument("login_name")
     sub.add_parser("cleanup")
     migrate = sub.add_parser("migrate-database")
-    migrate.add_argument("source", type=Path, help="Schema-5 SQLite database (source is read-only)")
+    migrate.add_argument(
+        "source", type=Path, help="Schema-5 SQLite database (source is read-only)"
+    )
     args = parser.parse_args()
     if args.command == "restore":
         restore_data(args.archive, args.destination)
@@ -45,11 +47,14 @@ def main():
     if args.command == "cleanup":
         db.cleanup(timestamp)
         cleanup_textures(db, timestamp)
-        print("Expired transient data deleted; receipts and audit retained for one day.")
+        print(
+            "Expired transient data deleted; receipts and audit retained for one day."
+        )
         return
     with db.write() as conn:
         row = conn.execute(
-            "SELECT id FROM accounts WHERE login_normalized=?", (args.login_name.lower(),)
+            "SELECT id FROM accounts WHERE login_normalized=?",
+            (args.login_name.lower(),),
         ).fetchone()
         if not row:
             parser.error("Account not found")

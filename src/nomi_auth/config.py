@@ -6,7 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="NOMI_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="NOMI_", env_file=".env", extra="ignore"
+    )
     public_url: str = "http://127.0.0.1:8000"
     data_dir: Path = Path("data")
     database_backend: Literal["sqlite", "mysql", "mariadb"] = "sqlite"
@@ -30,6 +32,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_database(self):
-        if self.database_backend != "sqlite" and (not self.mysql_database or not self.mysql_user):
+        if self.database_backend != "sqlite" and (
+            not self.mysql_database or not self.mysql_user
+        ):
             raise ValueError("MySQL database and user must not be empty")
         return self

@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from .config import Settings
+from .database_types import Connection
 from .db import Database
 from .errors import Problem
 from .models import MemberOperation, Redemption
@@ -29,11 +30,15 @@ class AccountManager:
             raise Problem("UNAUTHORIZED", "缺少有效凭证", 401)
         return header[7:]
 
-    def check_bot(self, header: str | None, request_data: Redemption | MemberOperation) -> None:
+    def check_bot(
+        self, header: str | None, request_data: Redemption | MemberOperation
+    ) -> None:
         """
         Accept events only from the configured bot and group.
         """
-        if not secrets.compare_digest(self.read_bearer(header).encode(), self.settings.bot_token.encode()):
+        if not secrets.compare_digest(
+            self.read_bearer(header).encode(), self.settings.bot_token.encode()
+        ):
             raise Problem("UNAUTHORIZED", "机器人凭证无效", 401)
         if (
             request_data.bot_app_id != self.settings.bot_app_id
@@ -41,7 +46,7 @@ class AccountManager:
         ):
             raise Problem("WRONG_GROUP", "仅允许指定机器人与群")
 
-    def find_token_account(self, connection: Any, token: str, kind: str) -> Any:
+    def find_token_account(self, connection: Connection, token: str, kind: str) -> Any:
         """
         Resolve an active account using an unexpired token of the required kind.
         """
@@ -55,7 +60,7 @@ class AccountManager:
 
     def issue_token(
         self,
-        connection: Any,
+        connection: Connection,
         account_id: str | None,
         kind: str,
         client_token: str | None = None,
@@ -77,7 +82,11 @@ class AccountManager:
         return token
 
     def record_audit(
-        self, connection: Any, action: str, account_id: str | None = None, detail: str | None = None
+        self,
+        connection: Connection,
+        action: str,
+        account_id: str | None = None,
+        detail: str | None = None,
     ) -> None:
         """
         Record an account operation without including secret credentials.
@@ -105,7 +114,7 @@ class AccountManager:
             available = not self.name_taken(connection, name)
         return {"available": available}
 
-    def name_taken(self, connection: Any, name: str) -> bool:
+    def name_taken(self, connection: Connection, name: str) -> bool:
         """
         Check both the original login name and the current profile name.
         """
@@ -116,7 +125,9 @@ class AccountManager:
         ).fetchone()
         return record is not None
 
-    def find_member(self, connection: Any, event: Redemption | MemberOperation) -> Any:
+    def find_member(
+        self, connection: Connection, event: Redemption | MemberOperation
+    ) -> Any:
         """
         Resolve the account bound to a trusted application, group and member tuple.
         """
@@ -126,7 +137,9 @@ class AccountManager:
             (event.bot_app_id, event.group_openid, event.member_openid),
         ).fetchone()
 
-    def create(self, connection: Any, name: str, event: Redemption | MemberOperation) -> tuple[str, str]:
+    def create(
+        self, connection: Connection, name: str, event: Redemption | MemberOperation
+    ) -> tuple[str, str]:
         """
         Create an account, profile and member binding in the caller's transaction.
         Name and identity availability must be checked by the caller first.

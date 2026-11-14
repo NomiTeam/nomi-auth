@@ -23,14 +23,18 @@ def data(database_settings):
     db = Database.from_settings(database_settings)
     (root / "texture-signing.pem").write_bytes(
         rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
-            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
         )
     )
     (root / "textures").mkdir()
     name = SKIN_HASH
     (root / "textures" / name).write_bytes(b"skin")
     with db.write() as conn:
-        conn.execute("INSERT INTO accounts VALUES('account','Alice','alice','active',1)")
+        conn.execute(
+            "INSERT INTO accounts VALUES('account','Alice','alice','active',1)"
+        )
         conn.execute(
             "INSERT INTO profiles(uuid,account_id,name,name_normalized,skin_hash) VALUES('profile','account','Alice','alice',?)",
             (name,),
@@ -52,7 +56,10 @@ def test_complete_backup_restore_and_overwrite_protection(data, tmp_path):
     ).read_bytes()
     assert (destination / "textures" / (SKIN_HASH)).read_bytes() == b"skin"
     with sqlite3.connect(destination / "nomi-auth.sqlite3") as conn:
-        assert conn.execute("SELECT name,uuid FROM profiles").fetchone() == ("Alice", "profile")
+        assert conn.execute("SELECT name,uuid FROM profiles").fetchone() == (
+            "Alice",
+            "profile",
+        )
     with pytest.raises(FileExistsError):
         restore_data(archive, destination)
 
@@ -77,7 +84,10 @@ def test_restore_rejects_corrupt_skin_without_publishing_directory(data, tmp_pat
     archive = tmp_path / "snapshot.tar.gz"
     corrupt = tmp_path / "corrupt-skin.tar.gz"
     backup_data(data, archive)
-    with tarfile.open(archive, "r:gz") as source, tarfile.open(corrupt, "w:gz") as target:
+    with (
+        tarfile.open(archive, "r:gz") as source,
+        tarfile.open(corrupt, "w:gz") as target,
+    ):
         for member in source:
             stream = source.extractfile(member)
             if member.name.startswith("textures/"):
@@ -97,7 +107,10 @@ def test_restore_rejects_corrupt_database_without_publishing_directory(data, tmp
     archive = tmp_path / "snapshot.tar.gz"
     corrupt = tmp_path / "corrupt.tar.gz"
     backup_data(data, archive)
-    with tarfile.open(archive, "r:gz") as source, tarfile.open(corrupt, "w:gz") as target:
+    with (
+        tarfile.open(archive, "r:gz") as source,
+        tarfile.open(corrupt, "w:gz") as target,
+    ):
         for member in source:
             stream = source.extractfile(member)
             if member.name == "nomi-auth.sqlite3":
@@ -154,7 +167,11 @@ def test_concurrent_cleanup_is_coalesced_and_failure_can_retry(data, monkeypatch
     assert calls == [100]
     data.cleanup_if_due(130)
     assert calls == [100, 130]
-    monkeypatch.setattr(data, "cleanup", lambda timestamp: (_ for _ in ()).throw(sqlite3.OperationalError()))
+    monkeypatch.setattr(
+        data,
+        "cleanup",
+        lambda timestamp: (_ for _ in ()).throw(sqlite3.OperationalError()),
+    )
     with pytest.raises(sqlite3.OperationalError):
         data.cleanup_if_due(160)
     monkeypatch.setattr(data, "cleanup", cleanup)
@@ -178,7 +195,9 @@ def test_backup_remains_consistent_during_concurrent_write(data, tmp_path, monke
 
     def rename():
         with data.write() as conn:
-            conn.execute("UPDATE profiles SET name='Renamed', name_normalized='renamed'")
+            conn.execute(
+                "UPDATE profiles SET name='Renamed', name_normalized='renamed'"
+            )
 
     with ThreadPoolExecutor(2) as executor:
         backup = executor.submit(backup_data, data, tmp_path / "consistent.tar.gz")
@@ -186,7 +205,9 @@ def test_backup_remains_consistent_during_concurrent_write(data, tmp_path, monke
             assert entered.wait(5)
             writer = executor.submit(rename)
             with data.read() as conn:
-                assert conn.execute("SELECT name FROM profiles").fetchone()[0] == "Alice"
+                assert (
+                    conn.execute("SELECT name FROM profiles").fetchone()[0] == "Alice"
+                )
             assert not writer.done()
         finally:
             release.set()

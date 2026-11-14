@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import secrets
 import string
 import time
@@ -26,3 +27,11 @@ def current_timestamp() -> int:
     Return Unix seconds for persisted expiry times.
     """
     return int(time.time())
+
+
+def derive_token(seed: str, request_id: str, nonce: str, kind: str) -> str:
+    """
+    Recreate one grant for an identical bounded retry without storing raw tokens.
+    """
+    message = f"{request_id}:{nonce}:{kind}".encode()
+    return hmac.digest(seed.encode(), message, "sha256").hex()

@@ -7,6 +7,7 @@ from fastapi import FastAPI, Header
 
 from .accounts import AccountManager
 from .config import Settings
+from .database_types import Connection
 from .db import Database
 from .errors import Problem
 from .models import Redemption, Registration
@@ -20,7 +21,11 @@ class RegistrationManager:
     """
 
     def __init__(
-        self, settings: Settings, database: Database, accounts: AccountManager, sessions: SessionManager
+        self,
+        settings: Settings,
+        database: Database,
+        accounts: AccountManager,
+        sessions: SessionManager,
     ) -> None:
         self.settings = settings
         self.database = database
@@ -39,7 +44,13 @@ class RegistrationManager:
         with self.database.write() as connection:
             connection.execute(
                 "INSERT INTO registrations(id,code_hash,poll_hash,name,expires_at) VALUES(?,?,?,?,?)",
-                (request_id, code_hash(verification_code), digest(poll_token), request_data.name, expires_at),
+                (
+                    request_id,
+                    code_hash(verification_code),
+                    digest(poll_token),
+                    request_data.name,
+                    expires_at,
+                ),
             )
         return {
             "request_id": request_id,
@@ -49,33 +60,48 @@ class RegistrationManager:
             "group_label": self.settings.group_label,
         }
 
-    def find_request(self, connection: Any, request_id: str, authorization: str | None) -> Any:
+    def find_request(
+        self, connection: Connection, request_id: str, authorization: str | None
+    ) -> Any:
         """
         Find a registration only when its private polling token matches.
         """
-        record = connection.execute("SELECT * FROM registrations WHERE id=?", (request_id,)).fetchone()
+        record = connection.execute(
+            "SELECT * FROM registrations WHERE id=?", (request_id,)
+        ).fetchone()
         if not record or not secrets.compare_digest(
             record["poll_hash"], digest(self.accounts.read_bearer(authorization))
         ):
             raise Problem("NOT_FOUND", "申请不存在或凭证无效", 404)
         return record
 
-    def status(self, request_id: str, authorization: str | None = Header(None)) -> dict[str, Any]:
+    def status(
+        self, request_id: str, authorization: str | None = Header(None)
+    ) -> dict[str, Any]:
         """
         Read the request result and consume a previously failed result.
         """
         with self.database.write() as connection:
             record = self.find_request(connection, request_id, authorization)
             if record["status"] == "FAILED":
-                connection.execute("DELETE FROM registrations WHERE id=?", (request_id,))
+                connection.execute(
+                    "DELETE FROM registrations WHERE id=?", (request_id,)
+                )
         state = (
             "EXPIRED"
-            if record["status"] == "PENDING" and record["expires_at"] <= current_timestamp()
+            if record["status"] == "PENDING"
+            and record["expires_at"] <= current_timestamp()
             else record["status"]
         )
-        return {"status": state, "expires_at": record["expires_at"], "error": record["error"]}
+        return {
+            "status": state,
+            "expires_at": record["expires_at"],
+            "error": record["error"],
+        }
 
-    def cancel(self, request_id: str, authorization: str | None = Header(None)) -> dict[str, Any]:
+    def cancel(
+        self, request_id: str, authorization: str | None = Header(None)
+    ) -> dict[str, Any]:
         """
         Cancel a pending registration before it can issue a session.
         """
@@ -86,7 +112,9 @@ class RegistrationManager:
             connection.execute("DELETE FROM registrations WHERE id=?", (request_id,))
         return {"status": "CANCELLED"}
 
-    def redeem(self, request_data: Redemption, authorization: str | None = Header(None)) -> dict[str, Any]:
+    def redeem(
+        self, request_data: Redemption, authorization: str | None = Header(None)
+    ) -> dict[str, Any]:
         """
         Verify a legacy registration and bind its first successful group member.
         """
@@ -102,7 +130,8 @@ class RegistrationManager:
                     raise Problem("EVENT_CONFLICT", "事件参数与原请求不一致", 409)
                 return json.loads(receipt["result"])
             record = connection.execute(
-                "SELECT * FROM registrations WHERE code_hash=?", (code_hash(request_data.code),)
+                "SELECT * FROM registrations WHERE code_hash=?",
+                (code_hash(request_data.code),),
             ).fetchone()
             if not record:
                 raise Problem("INVALID_CODE", "验证码无效")
@@ -112,7 +141,11 @@ class RegistrationManager:
                 raise Problem("REQUEST_EXPIRED", "验证码已过期")
             if connection.execute(
                 "SELECT 1 FROM identities WHERE app_id=? AND group_id=? AND member_id=?",
-                (request_data.bot_app_id, request_data.group_openid, request_data.member_openid),
+                (
+                    request_data.bot_app_id,
+                    request_data.group_openid,
+                    request_data.member_openid,
+                ),
             ).fetchone():
                 raise Problem("IDENTITY_ALREADY_BOUND", "该群成员已有账号", 409)
             name = record["name"]
@@ -121,11 +154,14 @@ class RegistrationManager:
                 (name.lower(), name.lower()),
             ).fetchone():
                 connection.execute(
-                    "UPDATE registrations SET status='FAILED',error='NAME_TAKEN' WHERE id=?", (record["id"],)
+                    "UPDATE registrations SET status='FAILED',error='NAME_TAKEN' WHERE id=?",
+                    (record["id"],),
                 )
                 result = {"status": "FAILED", "code": "NAME_TAKEN"}
             else:
-                account_id, _profile_id = self.accounts.create(connection, name, request_data)
+                account_id, _profile_id = self.accounts.create(
+                    connection, name, request_data
+                )
                 connection.execute(
                     "UPDATE registrations SET status='COMPLETED',account_id=? WHERE id=?",
                     (account_id, record["id"]),
@@ -144,20 +180,30 @@ class RegistrationManager:
             )
         return result
 
-    def exchange(self, request_id: str, authorization: str | None = Header(None)) -> dict[str, Any]:
+    def exchange(
+        self, request_id: str, authorization: str | None = Header(None)
+    ) -> dict[str, Any]:
         """
         Exchange a completed legacy registration exactly once.
         """
         with self.database.write() as connection:
             record = self.find_request(connection, request_id, authorization)
-            return self.sessions.issue_session(connection, record, "registrations", "COMPLETED")
+            return self.sessions.issue_session(
+                connection, record, "registrations", "COMPLETED"
+            )
 
     def add_routes(self, app: FastAPI) -> None:
         """
         Register the HTTP endpoints handled by this manager.
         """
-        app.post("/api/v1/registrations", status_code=201, response_model=None)(self.start)
+        app.post("/api/v1/registrations", status_code=201, response_model=None)(
+            self.start
+        )
         app.get("/api/v1/registrations/{request_id}", response_model=None)(self.status)
-        app.delete("/api/v1/registrations/{request_id}", response_model=None)(self.cancel)
+        app.delete("/api/v1/registrations/{request_id}", response_model=None)(
+            self.cancel
+        )
         app.post("/internal/v1/registrations/redeem", response_model=None)(self.redeem)
-        app.post("/api/v1/registrations/{request_id}/session", response_model=None)(self.exchange)
+        app.post("/api/v1/registrations/{request_id}/session", response_model=None)(
+            self.exchange
+        )

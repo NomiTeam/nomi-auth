@@ -14,7 +14,13 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "httpx>=0.28", "ruff>=0.11"]
+dev = [
+    "pytest>=8",
+    "httpx>=0.28",
+    "ruff>=0.11",
+    "pyrefly>=1.4.1",
+    "types-pymysql>=1.2.4.20261111",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -24,7 +30,12 @@ build-backend = "hatchling.build"
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 110
+line-length = 88
 
 [tool.ruff.lint]
 extend-ignore = ["B008"]
+
+[tool.pyrefly]
+project-includes = ["src/**/*.py"]
+search-path = ["src"]
+python-version = "3.12"

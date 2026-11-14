@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 
 import pymysql
@@ -28,7 +28,7 @@ class Runtime:
         self.request_lock = threading.Lock()
 
     @asynccontextmanager
-    async def lifespan(self, app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
         cleanup_task = asyncio.create_task(self._cleanup())
         try:
             yield
@@ -52,9 +52,13 @@ class Runtime:
                 logging.getLogger(__name__).exception("Transient data cleanup failed")
             await asyncio.sleep(30)
 
-    async def guard(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    async def guard(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         if self._rate_limited(request):
-            return JSONResponse({"code": "RATE_LIMITED", "message": "请求过于频繁"}, 429)
+            return JSONResponse(
+                {"code": "RATE_LIMITED", "message": "请求过于频繁"}, 429
+            )
 
         # Access-time cleanup also handles records that expired while stopped.
         try:
@@ -106,17 +110,21 @@ class Runtime:
 
 
 def database_unavailable() -> JSONResponse:
-    return JSONResponse({"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503)
+    return JSONResponse(
+        {"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503
+    )
 
 
 async def handle_problem(request: Request, error: Exception) -> JSONResponse:
     assert isinstance(error, Problem)
     if request.url.path.startswith("/api/yggdrasil"):
         return JSONResponse(
-            {"error": "ForbiddenOperationException", "errorMessage": error.message}, error.status
+            {"error": "ForbiddenOperationException", "errorMessage": error.message},
+            error.status,
         )
     return JSONResponse(
-        {"code": error.code, "message": error.message, "request_id": uuid.uuid4().hex}, error.status
+        {"code": error.code, "message": error.message, "request_id": uuid.uuid4().hex},
+        error.status,
     )
 
 
@@ -126,6 +134,11 @@ async def handle_database_error(request: Request, error: Exception) -> JSONRespo
 
 async def handle_invalid_request(request: Request, error: Exception) -> JSONResponse:
     if request.url.path.startswith("/api/yggdrasil"):
-        return JSONResponse({"error": "IllegalArgumentException", "errorMessage": "Invalid request."}, 400)
+        return JSONResponse(
+            {"error": "IllegalArgumentException", "errorMessage": "Invalid request."},
+            400,
+        )
     # Validation inputs may contain credentials; never echo them back to clients.
-    return JSONResponse({"code": "INVALID_REQUEST", "message": "请求格式或参数不符合要求"}, 422)
+    return JSONResponse(
+        {"code": "INVALID_REQUEST", "message": "请求格式或参数不符合要求"}, 422
+    )

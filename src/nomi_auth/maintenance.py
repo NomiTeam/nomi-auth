@@ -19,7 +19,10 @@ def cleanup_textures(db: Database, timestamp: int, retention: int = 86400):
     removed = 0
     with db.write() as conn:
         referenced = {
-            row[0] for row in conn.execute("SELECT skin_hash FROM profiles WHERE skin_hash IS NOT NULL")
+            row[0]
+            for row in conn.execute(
+                "SELECT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"
+            )
         }
         for path in (db.path.parent / "textures").glob("*"):
             if (
@@ -37,7 +40,9 @@ def validate_snapshot(directory: Path):
     """Reject incomplete or corrupt backups before restoring any service data."""
     if not (directory / "nomi-auth.sqlite3").is_file():
         raise ValueError("Snapshot is missing its database")
-    key = load_pem_private_key((directory / "texture-signing.pem").read_bytes(), password=None)
+    key = load_pem_private_key(
+        (directory / "texture-signing.pem").read_bytes(), password=None
+    )
     from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
     if not isinstance(key, RSAPrivateKey):
@@ -48,9 +53,14 @@ def validate_snapshot(directory: Path):
             or conn.execute("PRAGMA foreign_key_check").fetchone()
         ):
             raise ValueError("Snapshot database is corrupt")
-        for row in conn.execute("SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"):
+        for row in conn.execute(
+            "SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"
+        ):
             name = row[0]
-            if not re.fullmatch(r"[0-9a-f]{64}", name) or not (directory / "textures" / name).is_file():
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", name)
+                or not (directory / "textures" / name).is_file()
+            ):
                 raise ValueError("Snapshot is missing a referenced texture")
             texture = directory / "textures" / name
             if (
@@ -74,16 +84,24 @@ def backup_data(db: Database, destination: Path):
 
                 export_sqlite(locked, root / "nomi-auth.sqlite3")
             else:
-                with db.read() as source, closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as target:
+                with (
+                    db.read() as source,
+                    closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as target,
+                ):
+                    assert isinstance(source, sqlite3.Connection)
                     source.backup(target)
-            shutil.copyfile(db.path.parent / "texture-signing.pem", root / "texture-signing.pem")
+            shutil.copyfile(
+                db.path.parent / "texture-signing.pem", root / "texture-signing.pem"
+            )
             with closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as conn:
                 for (name,) in conn.execute(
                     "SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"
                 ):
                     if not re.fullmatch(r"[0-9a-f]{64}", name):
                         raise ValueError("Invalid texture reference")
-                    shutil.copyfile(db.path.parent / "textures" / name, root / "textures" / name)
+                    shutil.copyfile(
+                        db.path.parent / "textures" / name, root / "textures" / name
+                    )
         validate_snapshot(root)
         # Exclusive creation protects existing archives, including concurrent backup attempts.
         created = False
@@ -107,7 +125,9 @@ def restore_data(archive_path: Path, destination: Path):
     if destination.exists():
         raise FileExistsError("Restore destination must not exist")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".nomi-restore-", dir=destination.parent) as staging:
+    with tempfile.TemporaryDirectory(
+        prefix=".nomi-restore-", dir=destination.parent
+    ) as staging:
         root = Path(staging) / "data"
         root.mkdir(mode=0o700)
         (root / "textures").mkdir()
@@ -115,7 +135,8 @@ def restore_data(archive_path: Path, destination: Path):
             seen = set()
             for member in archive:
                 if not member.isfile() or not re.fullmatch(
-                    r"(?:nomi-auth\.sqlite3|texture-signing\.pem|textures/[0-9a-f]{64})", member.name
+                    r"(?:nomi-auth\.sqlite3|texture-signing\.pem|textures/[0-9a-f]{64})",
+                    member.name,
                 ):
                     raise ValueError("Unexpected or unsafe backup entry")
                 if member.name in seen:

@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, Response
 
 from .accounts import AccountManager
 from .config import Settings
+from .database_types import Connection
 from .db import Database
 from .errors import Problem
 from .models import MemberOperation, Rename
@@ -22,7 +23,11 @@ class ProfileManager:
     """
 
     def __init__(
-        self, settings: Settings, database: Database, accounts: AccountManager, receipts: ReceiptManager
+        self,
+        settings: Settings,
+        database: Database,
+        accounts: AccountManager,
+        receipts: ReceiptManager,
     ) -> None:
         self.settings = settings
         self.database = database
@@ -30,7 +35,9 @@ class ProfileManager:
         self.receipts = receipts
         self.skins = SkinStore(settings.data_dir / "textures")
 
-    def rename(self, request_data: Rename, authorization: str | None = Header(None)) -> dict[str, Any]:
+    def rename(
+        self, request_data: Rename, authorization: str | None = Header(None)
+    ) -> dict[str, Any]:
         """
         Rename the profile owned by a management token.
         """
@@ -40,22 +47,28 @@ class ProfileManager:
             )
             return self.rename_profile(connection, account["id"], request_data.name)
 
-    def rename_profile(self, connection: Any, account_id: str | None, name: str) -> dict[str, Any]:
+    def rename_profile(
+        self, connection: Connection, account_id: str | None, name: str
+    ) -> dict[str, Any]:
         """
         Validate and change a name while preserving the registered UUID.
         """
         if not re.fullmatch("[A-Za-z0-9_]{3,16}", name):
             raise Problem("INVALID_NAME", "名称须为 3 至 16 位字母、数字或下划线")
-        profile = connection.execute("SELECT * FROM profiles WHERE account_id=?", (account_id,)).fetchone()
+        profile = connection.execute(
+            "SELECT * FROM profiles WHERE account_id=?", (account_id,)
+        ).fetchone()
         if connection.execute(
-            "SELECT 1 FROM profiles WHERE name_normalized=? AND uuid<>?", (name.lower(), profile["uuid"])
+            "SELECT 1 FROM profiles WHERE name_normalized=? AND uuid<>?",
+            (name.lower(), profile["uuid"]),
         ).fetchone():
             raise Problem("NAME_TAKEN", "游戏名已被使用", 409)
         if profile["name"] == name:
             return {"uuid": profile["uuid"], "name": name}
         if (
             profile["last_renamed_at"]
-            and profile["last_renamed_at"] + self.settings.rename_cooldown > current_timestamp()
+            and profile["last_renamed_at"] + self.settings.rename_cooldown
+            > current_timestamp()
         ):
             raise Problem("RENAME_COOLDOWN", "尚在改名冷却期", 409)
         # Only the name changes; the original UUID remains the profile identity.
@@ -64,12 +77,18 @@ class ProfileManager:
             (name, name.lower(), current_timestamp(), profile["uuid"]),
         )
         self.accounts.record_audit(
-            connection, "rename", account_id, json.dumps({"old": profile["name"], "new": name})
+            connection,
+            "rename",
+            account_id,
+            json.dumps({"old": profile["name"], "new": name}),
         )
         return {"uuid": profile["uuid"], "name": name}
 
     def rename_game(
-        self, profile_id: str, request_data: Rename, authorization: str | None = Header(None)
+        self,
+        profile_id: str,
+        request_data: Rename,
+        authorization: str | None = Header(None),
     ) -> dict[str, Any]:
         """
         Rename a game profile and return its updated launcher session.
@@ -110,7 +129,11 @@ class ProfileManager:
                 return cached
             account = connection.execute(
                 "SELECT a.* FROM identities i JOIN accounts a ON a.id=i.account_id\n                WHERE i.app_id=? AND i.group_id=? AND i.member_id=?",
-                (request_data.bot_app_id, request_data.group_openid, request_data.member_openid),
+                (
+                    request_data.bot_app_id,
+                    request_data.group_openid,
+                    request_data.member_openid,
+                ),
             ).fetchone()
             try:
                 if not account:
@@ -158,7 +181,9 @@ class ProfileManager:
 
         # Recheck account access after image decoding and before changing any files.
         with self.database.write() as connection:
-            account = self._skin_account(connection, authorization, kind, expected_profile)
+            account = self._skin_account(
+                connection, authorization, kind, expected_profile
+            )
             self.skins.publish(content, texture_hash)
             previous_skin = connection.execute(
                 "SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)
@@ -169,14 +194,16 @@ class ProfileManager:
                 "UPDATE profiles SET skin_hash=?,skin_model=? WHERE account_id=?",
                 (texture_hash, model, account["id"]),
             )
-            self.accounts.record_audit(connection, "skin_upload", account["id"], texture_hash)
+            self.accounts.record_audit(
+                connection, "skin_upload", account["id"], texture_hash
+            )
 
         texture_url = f"{self.settings.public_url.rstrip('/')}/textures/{texture_hash}"
         return {"hash": texture_hash, "url": texture_url}
 
     def _skin_account(
         self,
-        connection: Any,
+        connection: Connection,
         authorization: str | None,
         kind: str,
         expected_profile: str | None,
@@ -223,7 +250,10 @@ class ProfileManager:
                 "SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)
             ).fetchone()[0]
             self.skins.retire(old)
-            connection.execute("UPDATE profiles SET skin_hash=NULL WHERE account_id=?", (account["id"],))
+            connection.execute(
+                "UPDATE profiles SET skin_hash=NULL WHERE account_id=?",
+                (account["id"],),
+            )
 
     def texture(self, texture_hash: str) -> Response:
         """
@@ -244,11 +274,19 @@ class ProfileManager:
         Register the HTTP endpoints handled by this manager.
         """
         app.patch("/api/v1/me/profile/name", response_model=None)(self.rename)
-        app.patch("/api/v1/game/profiles/{profile_id}/name", response_model=None)(self.rename_game)
-        app.post("/internal/v1/profiles/rename", response_model=None)(self.rename_member)
-        app.put("/api/v1/me/profile/skin", response_model=None)(self.upload_skin)
-        app.put("/api/yggdrasil/api/user/profile/{profile_id}/skin", status_code=204, response_model=None)(
-            self.upload_game_skin
+        app.patch("/api/v1/game/profiles/{profile_id}/name", response_model=None)(
+            self.rename_game
         )
-        app.delete("/api/v1/me/profile/skin", status_code=204, response_model=None)(self.clear_skin)
+        app.post("/internal/v1/profiles/rename", response_model=None)(
+            self.rename_member
+        )
+        app.put("/api/v1/me/profile/skin", response_model=None)(self.upload_skin)
+        app.put(
+            "/api/yggdrasil/api/user/profile/{profile_id}/skin",
+            status_code=204,
+            response_model=None,
+        )(self.upload_game_skin)
+        app.delete("/api/v1/me/profile/skin", status_code=204, response_model=None)(
+            self.clear_skin
+        )
         app.get("/textures/{texture_hash}", response_model=None)(self.texture)
