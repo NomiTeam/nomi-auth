@@ -3,7 +3,7 @@ import secrets
 import uuid
 from typing import Any
 
-from fastapi import Header
+from fastapi import FastAPI, Header
 
 from .accounts import AccountManager
 from .config import Settings
@@ -31,8 +31,9 @@ class RegistrationManager:
         """
         Create a name-specific registration request for older clients.
         """
-        if not self.accounts.availability(request_data.name)["available"]:
-            raise Problem("NAME_TAKEN", "用户名已被使用", 409)
+        with self.database.read() as connection:
+            if self.accounts.name_taken(connection, request_data.name):
+                raise Problem("NAME_TAKEN", "用户名已被使用", 409)
         request_id, verification_code, poll_token = (uuid.uuid4().hex, code(), secret())
         expires_at = current_timestamp() + self.settings.registration_ttl
         with self.database.write() as connection:
@@ -124,24 +125,7 @@ class RegistrationManager:
                 )
                 result = {"status": "FAILED", "code": "NAME_TAKEN"}
             else:
-                account_id, profile_id = (uuid.uuid4().hex, uuid.uuid4().hex)
-                connection.execute(
-                    "INSERT INTO accounts(id,login_name,login_normalized,created_at) VALUES(?,?,?,?)",
-                    (account_id, name, name.lower(), current_timestamp()),
-                )
-                connection.execute(
-                    "INSERT INTO profiles(uuid,account_id,name,name_normalized) VALUES(?,?,?,?)",
-                    (profile_id, account_id, name, name.lower()),
-                )
-                connection.execute(
-                    "INSERT INTO identities VALUES(?,?,?,?)",
-                    (
-                        account_id,
-                        request_data.bot_app_id,
-                        request_data.group_openid,
-                        request_data.member_openid,
-                    ),
-                )
+                account_id, _profile_id = self.accounts.create(connection, name, request_data)
                 connection.execute(
                     "UPDATE registrations SET status='COMPLETED',account_id=? WHERE id=?",
                     (account_id, record["id"]),
@@ -167,3 +151,13 @@ class RegistrationManager:
         with self.database.write() as connection:
             record = self.find_request(connection, request_id, authorization)
             return self.sessions.issue_session(connection, record, "registrations", "COMPLETED")
+
+    def add_routes(self, app: FastAPI) -> None:
+        """
+        Register the HTTP endpoints handled by this manager.
+        """
+        app.post("/api/v1/registrations", status_code=201, response_model=None)(self.start)
+        app.get("/api/v1/registrations/{request_id}", response_model=None)(self.status)
+        app.delete("/api/v1/registrations/{request_id}", response_model=None)(self.cancel)
+        app.post("/internal/v1/registrations/redeem", response_model=None)(self.redeem)
+        app.post("/api/v1/registrations/{request_id}/session", response_model=None)(self.exchange)

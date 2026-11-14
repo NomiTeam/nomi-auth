@@ -1,12 +1,10 @@
-import io
 import json
 import re
 import uuid
 from typing import Any
 
-from fastapi import File, Form, Header, UploadFile
+from fastapi import FastAPI, File, Form, Header, UploadFile
 from fastapi.responses import FileResponse, Response
-from PIL import Image, UnidentifiedImageError
 
 from .accounts import AccountManager
 from .config import Settings
@@ -15,6 +13,7 @@ from .errors import Problem
 from .models import MemberOperation, Rename
 from .receipts import ReceiptManager
 from .security import current_timestamp, digest
+from .skins import SkinStore
 
 
 class ProfileManager:
@@ -29,8 +28,7 @@ class ProfileManager:
         self.database = database
         self.accounts = accounts
         self.receipts = receipts
-        self.texture_dir = settings.data_dir / "textures"
-        self.texture_dir.mkdir(exist_ok=True)
+        self.skins = SkinStore(settings.data_dir / "textures")
 
     def rename(self, request_data: Rename, authorization: str | None = Header(None)) -> dict[str, Any]:
         """
@@ -141,74 +139,60 @@ class ProfileManager:
 
     def save_skin(
         self,
-        authorization: Any,
+        authorization: str | None,
         image: UploadFile,
         model: str,
         kind: str,
         expected_profile: str | None = None,
     ) -> dict[str, Any]:
         """
-        Validate and publish a skin while sharing the backup and cleanup write lock.
+        Validate a skin and publish it under the shared database writer lock.
         """
-        model = model or "default"
-
-        def checked_account(connection):
-            account = self.accounts.find_token_account(
-                connection, self.accounts.read_bearer(authorization), kind
-            )
-            if expected_profile is not None:
-                owned = connection.execute(
-                    "SELECT 1 FROM profiles WHERE uuid=? AND account_id=?", (expected_profile, account["id"])
-                ).fetchone()
-                if not owned:
-                    raise Problem("INVALID_PROFILE", "无法修改此角色的皮肤", 403)
-            return account
-
         with self.database.read() as connection:
-            checked_account(connection)
+            self._skin_account(connection, authorization, kind, expected_profile)
+
+        model = model or "default"
         if model not in ("default", "slim"):
             raise Problem("INVALID_MODEL", "不支持的手臂模型")
-        raw = image.file.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            raise Problem("INVALID_IMAGE", "图片不能超过 1 MiB", 413)
-        try:
-            with Image.open(io.BytesIO(raw)) as source:
-                if source.format != "PNG" or source.size not in ((64, 64), (64, 32)):
-                    raise Problem("INVALID_IMAGE", "只接受 64x64 或 64x32 PNG")
-                clean = source.convert("RGBA")
-                output = io.BytesIO()
-                clean.save(output, format="PNG")
-        except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
-            raise Problem("INVALID_IMAGE", "PNG 图片损坏")
-        import hashlib
+        content, texture_hash = self.skins.read_image(image.file)
 
-        content = output.getvalue()
-        texture_hash = hashlib.sha256(content).hexdigest()
-        target = self.texture_dir / texture_hash
-        # Publish files and update their references under the same writer lock.
+        # Recheck account access after image decoding and before changing any files.
         with self.database.write() as connection:
-            account = checked_account(connection)
-            if not target.exists():
-                temporary = self.texture_dir / ("." + uuid.uuid4().hex)
-                try:
-                    temporary.write_bytes(content)
-                    temporary.replace(target)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            old = connection.execute(
+            account = self._skin_account(connection, authorization, kind, expected_profile)
+            self.skins.publish(content, texture_hash)
+            previous_skin = connection.execute(
                 "SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)
             ).fetchone()[0]
-            if old and old != texture_hash and (self.texture_dir / old).is_file():
-                (self.texture_dir / old).touch()
+            if previous_skin != texture_hash:
+                self.skins.retire(previous_skin)
             connection.execute(
                 "UPDATE profiles SET skin_hash=?,skin_model=? WHERE account_id=?",
                 (texture_hash, model, account["id"]),
             )
             self.accounts.record_audit(connection, "skin_upload", account["id"], texture_hash)
-        return {
-            "hash": texture_hash,
-            "url": f"{self.settings.public_url.rstrip('/')}/textures/{texture_hash}",
-        }
+
+        texture_url = f"{self.settings.public_url.rstrip('/')}/textures/{texture_hash}"
+        return {"hash": texture_hash, "url": texture_url}
+
+    def _skin_account(
+        self,
+        connection: Any,
+        authorization: str | None,
+        kind: str,
+        expected_profile: str | None,
+    ) -> Any:
+        token = self.accounts.read_bearer(authorization)
+        account = self.accounts.find_token_account(connection, token, kind)
+        if expected_profile is None:
+            return account
+
+        profile = connection.execute(
+            "SELECT 1 FROM profiles WHERE uuid=? AND account_id=?",
+            (expected_profile, account["id"]),
+        ).fetchone()
+        if profile is None:
+            raise Problem("INVALID_PROFILE", "无法修改此角色的皮肤", 403)
+        return account
 
     def upload_game_skin(
         self,
@@ -238,23 +222,33 @@ class ProfileManager:
             old = connection.execute(
                 "SELECT skin_hash FROM profiles WHERE account_id=?", (account["id"],)
             ).fetchone()[0]
-            if old and (self.texture_dir / old).is_file():
-                (self.texture_dir / old).touch()
+            self.skins.retire(old)
             connection.execute("UPDATE profiles SET skin_hash=NULL WHERE account_id=?", (account["id"],))
 
     def texture(self, texture_hash: str) -> Response:
         """
         Serve an existing content-addressed PNG with immutable caching.
         """
-        import re
-
-        if not re.fullmatch("[0-9a-f]{64}", texture_hash) or not (self.texture_dir / texture_hash).is_file():
-            raise Problem("NOT_FOUND", "材质不存在", 404)
+        path = self.skins.find(texture_hash)
         return FileResponse(
-            self.texture_dir / texture_hash,
+            path,
             media_type="image/png",
             headers={
                 "Cache-Control": "public,max-age=31536000,immutable",
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    def add_routes(self, app: FastAPI) -> None:
+        """
+        Register the HTTP endpoints handled by this manager.
+        """
+        app.patch("/api/v1/me/profile/name", response_model=None)(self.rename)
+        app.patch("/api/v1/game/profiles/{profile_id}/name", response_model=None)(self.rename_game)
+        app.post("/internal/v1/profiles/rename", response_model=None)(self.rename_member)
+        app.put("/api/v1/me/profile/skin", response_model=None)(self.upload_skin)
+        app.put("/api/yggdrasil/api/user/profile/{profile_id}/skin", status_code=204, response_model=None)(
+            self.upload_game_skin
+        )
+        app.delete("/api/v1/me/profile/skin", status_code=204, response_model=None)(self.clear_skin)
+        app.get("/textures/{texture_hash}", response_model=None)(self.texture)

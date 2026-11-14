@@ -5,6 +5,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from fastapi import FastAPI
 from fastapi.responses import Response
 
 from .accounts import AccountManager
@@ -218,3 +219,27 @@ class Yggdrasil:
                 if record:
                     results.append(self.profile_response(record))
         return results
+
+    def add_routes(self, app: FastAPI) -> None:
+        """
+        Register the HTTP endpoints handled by this manager.
+        """
+        app.get(self.root + "/", response_model=None)(self.metadata)
+        app.get("/api/yggdrasil", response_model=None)(self.metadata)
+        app.post(self.root + "/authserver/authenticate", response_model=None)(self.legacy_auth_disabled)
+        app.post(self.root + "/authserver/signout", response_model=None)(self.legacy_auth_disabled)
+        app.post(self.root + "/authserver/refresh", response_model=None)(self.game_refresh)
+        app.post(self.root + "/authserver/validate", status_code=204, response_model=None)(self.game_validate)
+        app.post(self.root + "/authserver/invalidate", status_code=204, response_model=None)(
+            self.game_invalidate
+        )
+        app.post(self.root + "/sessionserver/session/minecraft/join", status_code=204, response_model=None)(
+            self.join
+        )
+        app.get(self.root + "/sessionserver/session/minecraft/hasJoined", response_model=None)(
+            self.has_joined
+        )
+        app.get(self.root + "/sessionserver/session/minecraft/profile/{profile_id}", response_model=None)(
+            self.get_profile
+        )
+        app.post(self.root + "/api/profiles/minecraft", response_model=None)(self.profiles)

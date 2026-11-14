@@ -3,7 +3,7 @@ import re
 import secrets
 from typing import Any
 
-from fastapi import Header
+from fastapi import FastAPI, Header
 
 from .accounts import AccountManager
 from .config import Settings
@@ -233,3 +233,13 @@ class SessionManager:
                 connection.execute("SELECT * FROM profiles WHERE account_id=?", (account["id"],)).fetchone()
             )
         return {"login_name": account["login_name"], "profile": profile}
+
+    def add_routes(self, app: FastAPI) -> None:
+        """
+        Register the HTTP endpoints handled by this manager.
+        """
+        app.get("/api/v1/game/profile", response_model=None)(self.current_profile)
+        app.post("/api/v1/sessions/refresh", response_model=None)(self.refresh)
+        app.delete("/api/v1/sessions/refresh", status_code=204, response_model=None)(self.revoke)
+        app.delete("/api/v1/sessions/current", status_code=204, response_model=None)(self.logout)
+        app.get("/api/v1/me", response_model=None)(self.me)

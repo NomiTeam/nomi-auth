@@ -1,10 +1,14 @@
 import re
 import secrets
+import uuid
 from typing import Any
+
+from fastapi import FastAPI
 
 from .config import Settings
 from .db import Database
 from .errors import Problem
+from .models import MemberOperation, Redemption
 from .security import current_timestamp, digest, secret
 
 
@@ -25,7 +29,7 @@ class AccountManager:
             raise Problem("UNAUTHORIZED", "缺少有效凭证", 401)
         return header[7:]
 
-    def check_bot(self, header: str | None, request_data: Any) -> None:
+    def check_bot(self, header: str | None, request_data: Redemption | MemberOperation) -> None:
         """
         Accept events only from the configured bot and group.
         """
@@ -98,8 +102,56 @@ class AccountManager:
         if not re.fullmatch("[A-Za-z0-9_]{3,16}", name):
             raise Problem("INVALID_NAME", "用户名须为 3 至 16 位字母、数字或下划线")
         with self.database.read() as connection:
-            occupied = connection.execute(
-                "SELECT 1 FROM accounts WHERE login_normalized=? UNION ALL SELECT 1 FROM profiles WHERE name_normalized=?",
-                (name.lower(), name.lower()),
-            ).fetchone()
-        return {"available": occupied is None}
+            available = not self.name_taken(connection, name)
+        return {"available": available}
+
+    def name_taken(self, connection: Any, name: str) -> bool:
+        """
+        Check both the original login name and the current profile name.
+        """
+        record = connection.execute(
+            "SELECT 1 FROM accounts WHERE login_normalized=? UNION ALL "
+            "SELECT 1 FROM profiles WHERE name_normalized=?",
+            (name.lower(), name.lower()),
+        ).fetchone()
+        return record is not None
+
+    def find_member(self, connection: Any, event: Redemption | MemberOperation) -> Any:
+        """
+        Resolve the account bound to a trusted application, group and member tuple.
+        """
+        return connection.execute(
+            "SELECT a.* FROM identities i JOIN accounts a ON a.id=i.account_id "
+            "WHERE i.app_id=? AND i.group_id=? AND i.member_id=?",
+            (event.bot_app_id, event.group_openid, event.member_openid),
+        ).fetchone()
+
+    def create(self, connection: Any, name: str, event: Redemption | MemberOperation) -> tuple[str, str]:
+        """
+        Create an account, profile and member binding in the caller's transaction.
+        Name and identity availability must be checked by the caller first.
+        """
+        account_id = uuid.uuid4().hex
+        profile_id = uuid.uuid4().hex
+        normalized_name = name.lower()
+
+        connection.execute(
+            "INSERT INTO accounts(id,login_name,login_normalized,created_at) VALUES(?,?,?,?)",
+            (account_id, name, normalized_name, current_timestamp()),
+        )
+        connection.execute(
+            "INSERT INTO profiles(uuid,account_id,name,name_normalized) VALUES(?,?,?,?)",
+            (profile_id, account_id, name, normalized_name),
+        )
+        connection.execute(
+            "INSERT INTO identities VALUES(?,?,?,?)",
+            (account_id, event.bot_app_id, event.group_openid, event.member_openid),
+        )
+        return account_id, profile_id
+
+    def add_routes(self, app: FastAPI) -> None:
+        """
+        Register the HTTP endpoints handled by this manager.
+        """
+        app.get("/health", response_model=None)(self.health)
+        app.get("/api/v1/names/availability", response_model=None)(self.availability)

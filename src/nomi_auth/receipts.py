@@ -4,6 +4,7 @@ from typing import Any
 from .config import Settings
 from .db import Database
 from .errors import Problem
+from .models import MemberOperation, Redemption
 from .security import current_timestamp, digest
 
 
@@ -16,7 +17,7 @@ class ReceiptManager:
         self.settings = settings
         self.database = database
 
-    def find(self, connection: Any, request_data: Any, operation: Any) -> Any:
+    def find(self, connection: Any, request_data: Redemption | MemberOperation, operation: str) -> Any:
         """
         Return a saved operation result or reject a changed event payload.
         """
@@ -30,7 +31,13 @@ class ReceiptManager:
             return json.loads(receipt["result"])
         return None
 
-    def save(self, connection: Any, request_data: Any, operation: Any, result: Any) -> None:
+    def save(
+        self,
+        connection: Any,
+        request_data: Redemption | MemberOperation,
+        operation: str,
+        result: dict[str, Any],
+    ) -> None:
         """
         Remember the result so the same bot event cannot execute twice.
         """
