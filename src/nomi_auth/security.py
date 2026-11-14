@@ -1,6 +1,7 @@
 import hashlib
 import secrets
 import string
+import time
 
 
 def digest(value: str) -> str:
@@ -18,3 +19,10 @@ def code() -> str:
 
 def code_hash(value: str) -> str:
     return digest(value.replace("-", "").strip().upper())
+
+
+def current_timestamp() -> int:
+    """
+    Return Unix seconds for persisted expiry times.
+    """
+    return int(time.time())
