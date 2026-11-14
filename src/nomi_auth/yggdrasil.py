@@ -211,7 +211,11 @@ class Yggdrasil:
         """
         with self.database.read() as connection:
             record = connection.execute(
-                "SELECT p.* FROM profiles p JOIN joins j ON p.uuid=j.profile_id\n                JOIN accounts a ON a.id=p.account_id WHERE p.name_normalized=? AND j.server_id=?\n                AND j.expires_at>? AND a.status='active'",
+                """
+                SELECT p.* FROM profiles p JOIN joins j ON p.uuid=j.profile_id
+                JOIN accounts a ON a.id=p.account_id WHERE p.name_normalized=? AND j.server_id=?
+                AND j.expires_at>? AND a.status='active'
+                """,
                 (username.lower(), serverId, current_timestamp()),
             ).fetchone()
         return (

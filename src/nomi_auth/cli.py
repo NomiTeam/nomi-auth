@@ -1,4 +1,6 @@
-"""Local maintenance commands. Run with the service's environment and filesystem access."""
+"""
+Local maintenance commands. Run with the service's environment and filesystem access.
+"""
 
 import argparse
 import time
@@ -31,41 +33,43 @@ def main():
         restore_data(args.archive, args.destination)
         print(f"Restored data directory: {args.destination}")
         return
-    cfg = Settings()
-    db = Database.from_settings(cfg)
+    settings = Settings()
+    database = Database.from_settings(settings)
     if args.command == "migrate-database":
         from .transfer import import_sqlite
 
-        counts = import_sqlite(args.source, db)
+        counts = import_sqlite(args.source, database)
         print(f"Migration verified: {sum(counts.values())} rows; source unchanged.")
         return
     if args.command == "backup":
-        backup_data(db, args.destination)
+        backup_data(database, args.destination)
         print(f"Complete data snapshot: {args.destination}")
         return
     timestamp = int(time.time())
     if args.command == "cleanup":
-        db.cleanup(timestamp)
-        cleanup_textures(db, timestamp)
+        database.cleanup(timestamp)
+        cleanup_textures(database, timestamp)
         print(
             "Expired transient data deleted; receipts and audit retained for one day."
         )
         return
-    with db.write() as conn:
-        row = conn.execute(
+    with database.write() as connection:
+        row = connection.execute(
             "SELECT id FROM accounts WHERE login_normalized=?",
             (args.login_name.lower(),),
         ).fetchone()
         if not row:
             parser.error("Account not found")
         status = "disabled" if args.command == "disable" else "active"
-        conn.execute("UPDATE accounts SET status=? WHERE id=?", (status, row["id"]))
-        conn.execute("DELETE FROM tokens WHERE account_id=?", (row["id"],))
-        conn.execute(
+        connection.execute(
+            "UPDATE accounts SET status=? WHERE id=?", (status, row["id"])
+        )
+        connection.execute("DELETE FROM tokens WHERE account_id=?", (row["id"],))
+        connection.execute(
             "DELETE FROM joins WHERE profile_id IN (SELECT uuid FROM profiles WHERE account_id=?)",
             (row["id"],),
         )
-        conn.execute(
+        connection.execute(
             "INSERT INTO audit(action,account_id,created_at) VALUES(?,?,?)",
             (args.command, row["id"], timestamp),
         )

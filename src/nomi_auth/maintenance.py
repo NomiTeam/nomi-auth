@@ -1,4 +1,6 @@
-"""Complete local snapshots and conservative orphan-texture maintenance."""
+"""
+Complete local snapshots and conservative orphan-texture maintenance.
+"""
 
 import hashlib
 import re
@@ -14,17 +16,19 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from .db import Database
 
 
-def cleanup_textures(db: Database, timestamp: int, retention: int = 86400):
-    """Keep referenced textures and recently uploaded files, including interrupted uploads."""
+def cleanup_textures(database: Database, timestamp: int, retention: int = 86400):
+    """
+    Keep referenced textures and recently uploaded files, including interrupted uploads.
+    """
     removed = 0
-    with db.write() as conn:
+    with database.write() as connection:
         referenced = {
             row[0]
-            for row in conn.execute(
+            for row in connection.execute(
                 "SELECT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"
             )
         }
-        for path in (db.path.parent / "textures").glob("*"):
+        for path in (database.path.parent / "textures").glob("*"):
             if (
                 path.is_file()
                 and not path.is_symlink()
@@ -37,7 +41,9 @@ def cleanup_textures(db: Database, timestamp: int, retention: int = 86400):
 
 
 def validate_snapshot(directory: Path):
-    """Reject incomplete or corrupt backups before restoring any service data."""
+    """
+    Reject incomplete or corrupt backups before restoring any service data.
+    """
     if not (directory / "nomi-auth.sqlite3").is_file():
         raise ValueError("Snapshot is missing its database")
     key = load_pem_private_key(
@@ -47,13 +53,13 @@ def validate_snapshot(directory: Path):
 
     if not isinstance(key, RSAPrivateKey):
         raise TypeError("Snapshot signing key must be RSA")
-    with closing(sqlite3.connect(directory / "nomi-auth.sqlite3")) as conn:
+    with closing(sqlite3.connect(directory / "nomi-auth.sqlite3")) as connection:
         if (
-            conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
-            or conn.execute("PRAGMA foreign_key_check").fetchone()
+            connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
+            or connection.execute("PRAGMA foreign_key_check").fetchone()
         ):
             raise ValueError("Snapshot database is corrupt")
-        for row in conn.execute(
+        for row in connection.execute(
             "SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"
         ):
             name = row[0]
@@ -70,37 +76,41 @@ def validate_snapshot(directory: Path):
                 raise ValueError("Snapshot contains a corrupt texture")
 
 
-def backup_data(db: Database, destination: Path):
-    """Snapshot database, referenced skins and the signing key without overwriting backups."""
+def backup_data(database: Database, destination: Path):
+    """
+    Snapshot database, referenced skins and the signing key without overwriting backups.
+    """
     destination = destination.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="nomi-backup-") as staging:
         root = Path(staging)
         (root / "textures").mkdir()
         # Writers publish texture files under this same database lock.
-        with db.write() as locked:
-            if db.backend == "mysql":
+        with database.write() as locked:
+            if database.backend == "mysql":
                 from .transfer import export_sqlite
 
                 export_sqlite(locked, root / "nomi-auth.sqlite3")
             else:
                 with (
-                    db.read() as source,
+                    database.read() as source,
                     closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as target,
                 ):
                     assert isinstance(source, sqlite3.Connection)
                     source.backup(target)
             shutil.copyfile(
-                db.path.parent / "texture-signing.pem", root / "texture-signing.pem"
+                database.path.parent / "texture-signing.pem",
+                root / "texture-signing.pem",
             )
-            with closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as conn:
-                for (name,) in conn.execute(
+            with closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as connection:
+                for (name,) in connection.execute(
                     "SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"
                 ):
                     if not re.fullmatch(r"[0-9a-f]{64}", name):
                         raise ValueError("Invalid texture reference")
                     shutil.copyfile(
-                        db.path.parent / "textures" / name, root / "textures" / name
+                        database.path.parent / "textures" / name,
+                        root / "textures" / name,
                     )
         validate_snapshot(root)
         # Exclusive creation protects existing archives, including concurrent backup attempts.
@@ -120,7 +130,9 @@ def backup_data(db: Database, destination: Path):
 
 
 def restore_data(archive_path: Path, destination: Path):
-    """Restore only into a new directory; never overwrite a running service's data."""
+    """
+    Restore only into a new directory; never overwrite a running service's data.
+    """
     destination = destination.resolve()
     if destination.exists():
         raise FileExistsError("Restore destination must not exist")

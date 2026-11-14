@@ -128,7 +128,10 @@ class ProfileManager:
             if cached is not None:
                 return cached
             account = connection.execute(
-                "SELECT a.* FROM identities i JOIN accounts a ON a.id=i.account_id\n                WHERE i.app_id=? AND i.group_id=? AND i.member_id=?",
+                """
+                SELECT a.* FROM identities i JOIN accounts a ON a.id=i.account_id
+                WHERE i.app_id=? AND i.group_id=? AND i.member_id=?
+                """,
                 (
                     request_data.bot_app_id,
                     request_data.group_openid,

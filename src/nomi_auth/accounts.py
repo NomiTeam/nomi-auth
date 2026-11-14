@@ -51,7 +51,10 @@ class AccountManager:
         Resolve an active account using an unexpired token of the required kind.
         """
         record = connection.execute(
-            "SELECT a.* FROM tokens t JOIN accounts a ON a.id=t.account_id\n            WHERE t.hash=? AND t.kind=? AND t.expires_at>? AND a.status='active'",
+            """
+            SELECT a.* FROM tokens t JOIN accounts a ON a.id=t.account_id
+            WHERE t.hash=? AND t.kind=? AND t.expires_at>? AND a.status='active'
+            """,
             (digest(token), kind, current_timestamp()),
         ).fetchone()
         if not record:

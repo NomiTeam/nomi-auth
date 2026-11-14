@@ -1,4 +1,6 @@
-"""Create local development configuration without overwriting existing credentials."""
+"""
+Create local development configuration without overwriting existing credentials.
+"""
 
 import argparse
 import json

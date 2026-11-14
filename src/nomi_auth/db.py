@@ -4,6 +4,7 @@ from collections.abc import Generator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from .config import Settings
 from .database_types import Connection
 
 SCHEMA = """
@@ -58,67 +59,88 @@ class Database:
     backend = "sqlite"
 
     @classmethod
-    def from_settings(cls, settings):
+    def from_settings(cls, settings: Settings) -> "Database":
         if settings.database_backend == "sqlite":
             return cls(settings.data_dir / "nomi-auth.sqlite3")
         from .mysql import MySQLDatabase
 
         return MySQLDatabase(settings)
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path) -> None:
         self.path = path
         self._cleanup_lock = threading.Lock()
         self._last_cleanup: int | None = None
         path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect_sqlite()) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(SCHEMA)
-        # v2 removes password storage while preserving accounts, identities and UUIDs.
-        with self.write() as conn:
-            versions = [
-                r[0] for r in conn.execute("SELECT version FROM schema_versions")
-            ]
-            if versions and max(versions) > 5:
-                raise RuntimeError("Database schema is newer than this application")
-            for table in ("accounts", "registrations"):
-                columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-                if "password_hash" in columns:
-                    conn.execute(f"ALTER TABLE {table} DROP COLUMN password_hash")
-                if table == "registrations" and "session_issued" not in columns:
-                    conn.execute(
-                        "ALTER TABLE registrations ADD COLUMN session_issued INTEGER NOT NULL DEFAULT 0"
-                    )
-            conn.execute("DROP TABLE IF EXISTS recoveries")
-            if 2 not in versions:
-                # Revoke old sessions at the authentication-mechanism boundary.
-                conn.execute("DELETE FROM tokens")
-                conn.execute("DELETE FROM joins")
-            conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(2)")
-            # A claimed login may wait for a name supplied by the same group member.
-            columns = {r[1] for r in conn.execute("PRAGMA table_info(login_requests)")}
-            for column in ("app_id", "group_id", "member_id", "error"):
-                if column not in columns:
-                    conn.execute(f"ALTER TABLE login_requests ADD COLUMN {column} TEXT")
-            conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(3)")
-            columns = {r[1] for r in conn.execute("PRAGMA table_info(receipts)")}
-            if "created_at" not in columns:
-                conn.execute(
-                    "ALTER TABLE receipts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
-                )
-                conn.execute(
-                    "UPDATE receipts SET created_at=unixepoch() WHERE created_at=0"
-                )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS receipt_created ON receipts(created_at)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS audit_created ON audit(created_at)"
-            )
-            conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(4)")
-            conn.execute("INSERT OR IGNORE INTO schema_versions VALUES(5)")
+        with closing(self._connect_sqlite()) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.executescript(SCHEMA)
+        with self.write() as connection:
+            self._upgrade_sqlite(connection)
 
-    def cleanup_if_due(self, timestamp: int):
-        """Coalesce concurrent maintenance requests; failures remain eligible for retry."""
+    def _upgrade_sqlite(self, connection: Connection) -> None:
+        versions = [
+            record[0]
+            for record in connection.execute("SELECT version FROM schema_versions")
+        ]
+        if versions and max(versions) > 5:
+            raise RuntimeError("Database schema is newer than this application")
+
+        self._remove_password_columns(connection)
+        connection.execute("DROP TABLE IF EXISTS recoveries")
+        if 2 not in versions:
+            # Passwordless authentication cannot reuse sessions from the old mechanism.
+            connection.execute("DELETE FROM tokens")
+            connection.execute("DELETE FROM joins")
+        connection.execute("INSERT OR IGNORE INTO schema_versions VALUES(2)")
+
+        self._upgrade_login_requests(connection)
+        connection.execute("INSERT OR IGNORE INTO schema_versions VALUES(3)")
+        self._upgrade_receipts(connection)
+        connection.execute("INSERT OR IGNORE INTO schema_versions VALUES(4)")
+        connection.execute("INSERT OR IGNORE INTO schema_versions VALUES(5)")
+
+    def _remove_password_columns(self, connection: Connection) -> None:
+        for table in ("accounts", "registrations"):
+            columns = self._sqlite_columns(connection, table)
+            if "password_hash" in columns:
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN password_hash")
+            if table == "registrations" and "session_issued" not in columns:
+                connection.execute(
+                    "ALTER TABLE registrations ADD COLUMN session_issued INTEGER NOT NULL DEFAULT 0"
+                )
+
+    def _upgrade_login_requests(self, connection: Connection) -> None:
+        columns = self._sqlite_columns(connection, "login_requests")
+        for column in ("app_id", "group_id", "member_id", "error"):
+            if column not in columns:
+                connection.execute(
+                    f"ALTER TABLE login_requests ADD COLUMN {column} TEXT"
+                )
+
+    def _upgrade_receipts(self, connection: Connection) -> None:
+        if "created_at" not in self._sqlite_columns(connection, "receipts"):
+            connection.execute(
+                "ALTER TABLE receipts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.execute(
+                "UPDATE receipts SET created_at=unixepoch() WHERE created_at=0"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS receipt_created ON receipts(created_at)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS audit_created ON audit(created_at)"
+        )
+
+    def _sqlite_columns(self, connection: Connection, table: str) -> set[str]:
+        return {
+            record[1] for record in connection.execute(f"PRAGMA table_info({table})")
+        }
+
+    def cleanup_if_due(self, timestamp: int) -> None:
+        """
+        Coalesce concurrent maintenance requests; failures remain eligible for retry.
+        """
         with self._cleanup_lock:
             if (
                 self._last_cleanup is not None
@@ -128,9 +150,11 @@ class Database:
             self.cleanup(timestamp)
             self._last_cleanup = timestamp
 
-    def cleanup(self, timestamp: int):
-        """Delete expired transient data without touching accounts, identities or UUIDs."""
-        with self.write() as conn:
+    def cleanup(self, timestamp: int) -> None:
+        """
+        Delete expired transient data without touching accounts, identities or UUIDs.
+        """
+        with self.write() as connection:
             for table in (
                 "refresh_retries",
                 "login_retries",
@@ -139,13 +163,15 @@ class Database:
                 "registrations",
                 "login_requests",
             ):
-                conn.execute(f"DELETE FROM {table} WHERE expires_at<=?", (timestamp,))
+                connection.execute(
+                    f"DELETE FROM {table} WHERE expires_at<=?", (timestamp,)
+                )
             for table in ("registrations", "login_requests"):
-                conn.execute(
+                connection.execute(
                     f"DELETE FROM {table} WHERE status='CANCELLED' OR session_issued=1"
                 )
             for table in ("receipts", "audit"):
-                conn.execute(
+                connection.execute(
                     f"DELETE FROM {table} WHERE created_at<=?", (timestamp - 86400,)
                 )
 
@@ -153,27 +179,27 @@ class Database:
         return self._connect_sqlite()
 
     def _connect_sqlite(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA synchronous=FULL")
-        return conn
+        connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
 
     @contextmanager
     def read(self) -> Generator[Connection, None, None]:
-        conn = self.connect()
+        connection = self.connect()
         try:
-            yield conn
+            yield connection
         finally:
-            conn.close()
+            connection.close()
 
     @contextmanager
     def write(self) -> Generator[Connection, None, None]:
-        with self.read() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.read() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             try:
-                yield conn
-                conn.commit()
+                yield connection
+                connection.commit()
             except BaseException:
-                conn.rollback()
+                connection.rollback()
                 raise

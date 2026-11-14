@@ -1,4 +1,6 @@
-"""MySQL/MariaDB storage; preserve SQLite's serialized writer semantics."""
+"""
+MySQL/MariaDB storage; preserve SQLite's serialized writer semantics.
+"""
 
 import hashlib
 import threading
@@ -7,6 +9,7 @@ from contextlib import closing, contextmanager
 
 import pymysql
 
+from .config import Settings
 from .db import Database
 
 # Keep column order compatible with SQLite and existing positional inserts.
@@ -122,7 +125,7 @@ class Connection:
 class MySQLDatabase(Database):
     backend = "mysql"
 
-    def __init__(self, settings):
+    def __init__(self, settings: Settings) -> None:
         self.settings = settings
         # Files remain in data_dir independently of the selected SQL backend.
         self.path = settings.data_dir / "nomi-auth.sqlite3"
@@ -133,60 +136,58 @@ class MySQLDatabase(Database):
             "nomi-auth:"
             + hashlib.sha256(settings.mysql_database.encode()).hexdigest()[:48]
         )
-        with self.write() as conn:
-            tables = {row[0] for row in conn.execute("SHOW TABLES")}
-            if "schema_versions" in tables:
-                versions = [
-                    row[0]
-                    for row in conn.execute("SELECT version FROM schema_versions")
-                ]
-                if versions and max(versions) != 5:
-                    raise RuntimeError("Unsupported MySQL database schema")
-            elif tables:
-                raise RuntimeError(
-                    "MySQL destination must be a dedicated empty database"
-                )
-            # DDL implicitly commits on MySQL; the connection-scoped lock still holds.
-            for statement in MYSQL_SCHEMA.split(";"):
-                if statement.strip():
-                    conn.execute(
-                        statement
-                        + " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
-                    )
+        with self.write() as connection:
+            self._initialize_schema(connection)
+
+    def _initialize_schema(self, connection: Connection) -> None:
+        tables = {record[0] for record in connection.execute("SHOW TABLES")}
+        versions = []
+        if "schema_versions" in tables:
             versions = [
-                row[0] for row in conn.execute("SELECT version FROM schema_versions")
+                record[0]
+                for record in connection.execute("SELECT version FROM schema_versions")
             ]
             if versions and max(versions) != 5:
                 raise RuntimeError("Unsupported MySQL database schema")
-            if not versions:
-                for version in (2, 3, 4, 5):
-                    conn.execute("INSERT INTO schema_versions VALUES(?)", (version,))
+        elif tables:
+            raise RuntimeError("MySQL destination must be a dedicated empty database")
+
+        # DDL implicitly commits, but the connection-scoped writer lock still holds.
+        for statement in MYSQL_SCHEMA.split(";"):
+            if statement.strip():
+                connection.execute(
+                    statement
+                    + " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
+                )
+        if not versions:
+            for version in (2, 3, 4, 5):
+                connection.execute("INSERT INTO schema_versions VALUES(?)", (version,))
 
     def connect(self) -> Connection:
-        cfg = self.settings
+        settings = self.settings
         raw = pymysql.connect(
-            host=cfg.mysql_host,
-            port=cfg.mysql_port,
-            user=cfg.mysql_user,
-            password=cfg.mysql_password.get_secret_value(),
-            database=cfg.mysql_database,
-            unix_socket=cfg.mysql_unix_socket,
+            host=settings.mysql_host,
+            port=settings.mysql_port,
+            user=settings.mysql_user,
+            password=settings.mysql_password.get_secret_value(),
+            database=settings.mysql_database,
+            unix_socket=settings.mysql_unix_socket,
             charset="utf8mb4",
             autocommit=True,
-            connect_timeout=cfg.database_timeout,
-            read_timeout=cfg.database_timeout,
-            write_timeout=cfg.database_timeout,
+            connect_timeout=settings.database_timeout,
+            read_timeout=settings.database_timeout,
+            write_timeout=settings.database_timeout,
             sql_mode="STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION",
-            ssl_ca=str(cfg.mysql_ssl_ca) if cfg.mysql_ssl_ca else None,
-            ssl_verify_cert=bool(cfg.mysql_ssl_ca),
-            ssl_verify_identity=bool(cfg.mysql_ssl_ca),
+            ssl_ca=str(settings.mysql_ssl_ca) if settings.mysql_ssl_ca else None,
+            ssl_verify_cert=bool(settings.mysql_ssl_ca),
+            ssl_verify_identity=bool(settings.mysql_ssl_ca),
         )
         return Connection(raw)
 
     @contextmanager
     def write(self) -> Generator[Connection, None, None]:
-        with closing(self.connect()) as conn:
-            lock_result = conn.execute(
+        with closing(self.connect()) as connection:
+            lock_result = connection.execute(
                 "SELECT GET_LOCK(?, ?)",
                 (self.lock_name, self.settings.database_timeout),
             ).fetchone()
@@ -195,10 +196,10 @@ class MySQLDatabase(Database):
                     1205, "Timed out waiting for Nomi database writer"
                 )
             # The read context closes this connection, releasing the advisory lock on every exit.
-            conn.raw.begin()
+            connection.raw.begin()
             try:
-                yield conn
-                conn.commit()
+                yield connection
+                connection.commit()
             except BaseException:
-                conn.rollback()
+                connection.rollback()
                 raise

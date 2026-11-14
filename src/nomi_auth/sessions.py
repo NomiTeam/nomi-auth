@@ -232,8 +232,8 @@ class SessionManager:
             "SELECT * FROM profiles WHERE account_id=?", (account["id"],)
         ).fetchone()
         expiries = {
-            r["kind"]: r["expires_at"]
-            for r in connection.execute(
+            record["kind"]: record["expires_at"]
+            for record in connection.execute(
                 "SELECT kind,expires_at FROM tokens WHERE hash IN (?,?)",
                 (digest(access), digest(refresh)),
             )
