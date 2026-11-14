@@ -22,13 +22,20 @@ def main():
     enable = sub.add_parser("enable")
     enable.add_argument("login_name")
     sub.add_parser("cleanup")
+    migrate = sub.add_parser("migrate-database")
+    migrate.add_argument("source", type=Path, help="Schema-5 SQLite database (source is read-only)")
     args = parser.parse_args()
     if args.command == "restore":
         restore_data(args.archive, args.destination)
         print(f"Restored data directory: {args.destination}")
         return
     cfg = Settings()
-    db = Database(cfg.data_dir / "nomi-auth.sqlite3")
+    db = Database.from_settings(cfg)
+    if args.command == "migrate-database":
+        from .transfer import import_sqlite
+        counts = import_sqlite(args.source, db)
+        print(f"Migration verified: {sum(counts.values())} rows; source unchanged.")
+        return
     if args.command == "backup":
         backup_data(db, args.destination)
         print(f"Complete data snapshot: {args.destination}")

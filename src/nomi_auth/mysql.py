@@ -131,6 +131,13 @@ class MySQLDatabase(Database):
         self._last_cleanup = None
         self.lock_name = "nomi-auth:" + hashlib.sha256(settings.mysql_database.encode()).hexdigest()[:48]
         with self.write() as conn:
+            tables = {row[0] for row in conn.execute("SHOW TABLES")}
+            if "schema_versions" in tables:
+                versions = [row[0] for row in conn.execute("SELECT version FROM schema_versions")]
+                if versions and max(versions) != 5:
+                    raise RuntimeError("Unsupported MySQL database schema")
+            elif tables:
+                raise RuntimeError("MySQL destination must be a dedicated empty database")
             # DDL implicitly commits on MySQL; the connection-scoped lock still holds.
             for statement in MYSQL_SCHEMA.split(";"):
                 if statement.strip():

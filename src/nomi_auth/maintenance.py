@@ -56,9 +56,13 @@ def backup_data(db: Database, destination: Path):
         root = Path(staging)
         (root / "textures").mkdir()
         # Writers publish texture files under this same database lock.
-        with db.write():
-            with db.read() as source, closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as target:
-                source.backup(target)
+        with db.write() as locked:
+            if db.backend == "mysql":
+                from .transfer import export_sqlite
+                export_sqlite(locked, root / "nomi-auth.sqlite3")
+            else:
+                with db.read() as source, closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as target:
+                    source.backup(target)
             shutil.copyfile(db.path.parent / "texture-signing.pem", root / "texture-signing.pem")
             with closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as conn:
                 for (name,) in conn.execute("SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"):
