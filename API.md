@@ -16,9 +16,9 @@
 ## 推荐登录流程
 
 1. 启动器 `POST /api/v1/logins`，发送 `{}`，不提交账号或密码。
-2. 响应状态 201，包含 `request_id`、`code`、`poll_token`、`expires_at`、`group_label`。将 `登录 <code>` 交给玩家在指定群发送，申请默认有效 5 分钟。
+2. 响应状态 201，包含 `request_id`、`code`、`poll_token`、`expires_at`、`group_label`。将 `登录 验证码` 交给玩家在指定群发送，申请默认有效 5 分钟。
 3. 机器人从可信群事件取得成员身份，调用 `/internal/v1/logins/verify`。已有账号返回 `VERIFIED`，没有账号返回 `AWAITING_NAME`。
-4. 未注册成员发送 `注册 <id>` 后，机器人调用 `/internal/v1/logins/register`。成功返回 `REGISTERED`，申请转为 `VERIFIED`。
+4. 未注册成员发送 `注册 ID` 后，机器人调用 `/internal/v1/logins/register`。成功返回 `REGISTERED`，申请转为 `VERIFIED`。
 5. 启动器用 poll_token 查询申请，在 `VERIFIED` 后领取会话。关闭窗口应取消申请。
 
 同一验证码由首个成功验证的成员领取，不使用第二验证码；机器人必须只转发真实消息事件中的身份，不能接受用户自报的成员 ID。
