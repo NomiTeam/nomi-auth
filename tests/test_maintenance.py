@@ -18,9 +18,9 @@ SKIN_HASH = hashlib.sha256(b"skin").hexdigest()
 
 
 @pytest.fixture
-def data(tmp_path):
-    root = tmp_path / "data"
-    db = Database(root / "nomi-auth.sqlite3")
+def data(database_settings):
+    root = database_settings.data_dir
+    db = Database.from_settings(database_settings)
     (root / "texture-signing.pem").write_bytes(rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
     (root / "textures").mkdir()

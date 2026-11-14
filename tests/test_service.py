@@ -15,9 +15,9 @@ from nomi_auth.config import Settings
 
 
 @pytest.fixture
-def client(tmp_path):
+def client(database_settings):
     return TestClient(
-        create_app(Settings(data_dir=tmp_path, bot_token="x" * 32, bot_app_id="app", group_openid="group"))
+        create_app(database_settings)
     )
 
 
@@ -316,8 +316,14 @@ def test_password_routes_removed_and_legacy_auth_disabled(client):
         == 403
     )
     with client.app.state.db.read() as conn:
-        assert "password_hash" not in {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
-        assert "password_hash" not in {r[1] for r in conn.execute("PRAGMA table_info(registrations)")}
+        for table in ("accounts", "registrations"):
+            if client.app.state.db.backend == "mysql":
+                columns = {r[0] for r in conn.execute(
+                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?",
+                    (table,))}
+            else:
+                columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            assert "password_hash" not in columns
 
 
 def test_non_ascii_bot_credential_is_rejected_without_server_error(client):
@@ -823,6 +829,8 @@ def test_authenticated_profile_syncs_bot_rename_without_changing_uuid(client):
 def test_schema_four_upgrade_keeps_existing_accounts_and_sessions(client):
     from nomi_auth.db import Database
 
+    if client.app.state.db.backend != "sqlite":
+        pytest.skip("Legacy SQLite schema migration")
     create_account(client)
     session = login(client)
     with client.app.state.db.write() as conn:
@@ -837,3 +845,4 @@ def test_schema_four_upgrade_keeps_existing_accounts_and_sessions(client):
             == session["game"]["selectedProfile"]["id"]
         )
     assert client.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 204
+
