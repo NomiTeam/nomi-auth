@@ -3,6 +3,7 @@ import io
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
@@ -467,7 +468,7 @@ def test_restart_keeps_verified_login_and_key(client):
 
 def test_v1_migration_preserves_identity_and_uuid(tmp_path):
     path = tmp_path / "nomi-auth.sqlite3"
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.executescript("""
         CREATE TABLE schema_versions(version INTEGER PRIMARY KEY);
         INSERT INTO schema_versions VALUES(1);

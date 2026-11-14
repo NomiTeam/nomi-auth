@@ -5,6 +5,7 @@ import sqlite3
 import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from threading import Event
 
 import pytest
@@ -55,7 +56,7 @@ def test_complete_backup_restore_and_overwrite_protection(data, tmp_path):
         data.path.parent / "texture-signing.pem"
     ).read_bytes()
     assert (destination / "textures" / (SKIN_HASH)).read_bytes() == b"skin"
-    with sqlite3.connect(destination / "nomi-auth.sqlite3") as conn:
+    with closing(sqlite3.connect(destination / "nomi-auth.sqlite3")) as conn:
         assert conn.execute("SELECT name,uuid FROM profiles").fetchone() == (
             "Alice",
             "profile",
