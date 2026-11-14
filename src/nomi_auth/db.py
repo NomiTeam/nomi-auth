@@ -52,6 +52,15 @@ CREATE TABLE IF NOT EXISTS login_retries(
 
 
 class Database:
+    backend = "sqlite"
+
+    @classmethod
+    def from_settings(cls, settings):
+        if settings.database_backend == "sqlite":
+            return cls(settings.data_dir / "nomi-auth.sqlite3")
+        from .mysql import MySQLDatabase
+        return MySQLDatabase(settings)
+
     def __init__(self, path: Path):
         self.path = path
         self._cleanup_lock = threading.Lock()

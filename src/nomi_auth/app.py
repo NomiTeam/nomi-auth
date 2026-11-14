@@ -13,6 +13,7 @@ import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
 
+import pymysql
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import FastAPI, File, Form, Header, Request, UploadFile
@@ -76,7 +77,7 @@ def now():
 
 def create_app(settings: Settings | None = None):
     cfg = settings or Settings()
-    db = Database(cfg.data_dir / "nomi-auth.sqlite3")
+    db = Database.from_settings(cfg)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -89,7 +90,7 @@ def create_app(settings: Settings | None = None):
                         from .maintenance import cleanup_textures
                         await asyncio.to_thread(cleanup_textures, db, now())
                         next_texture_cleanup = now() + 3600
-                except (sqlite3.Error, OSError):
+                except (sqlite3.Error, pymysql.MySQLError, OSError):
                     logging.getLogger(__name__).exception("Transient data cleanup failed")
                 await asyncio.sleep(30)
 
@@ -133,7 +134,7 @@ def create_app(settings: Settings | None = None):
         # Access-time cleanup also covers expired records when the service was stopped.
         try:
             await asyncio.to_thread(db.cleanup_if_due, now())
-        except sqlite3.Error:
+        except (sqlite3.Error, pymysql.MySQLError):
             return JSONResponse({"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503)
         response = await call_next(request)
         if not request.url.path.startswith("/textures/"):
@@ -150,6 +151,7 @@ def create_app(settings: Settings | None = None):
             {"code": exc.code, "message": exc.message, "request_id": uuid.uuid4().hex}, exc.status
         )
 
+    @app.exception_handler(pymysql.MySQLError)
     @app.exception_handler(sqlite3.OperationalError)
     async def database_error(request, exc):
         return JSONResponse({"code": "DATABASE_UNAVAILABLE", "message": "数据库暂时不可用，请重试"}, 503)
@@ -1034,8 +1036,9 @@ def install_yggdrasil(app, cfg, db, account_for_token, issue):
             _, _, profile = token_and_profile(conn, body)
             if body.get("selectedProfile") != profile["uuid"]:
                 raise Problem("INVALID_PROFILE", "Invalid token.", 403)
+            conn.execute("DELETE FROM joins WHERE profile_id=? AND server_id=?", (profile["uuid"], server_id))
             conn.execute(
-                "INSERT OR REPLACE INTO joins VALUES(?,?,?)", (profile["uuid"], server_id, now() + 30)
+                "INSERT INTO joins VALUES(?,?,?)", (profile["uuid"], server_id, now() + 30)
             )
 
     @app.get(root + "/sessionserver/session/minecraft/hasJoined")
