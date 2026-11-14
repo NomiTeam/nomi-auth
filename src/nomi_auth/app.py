@@ -102,7 +102,8 @@ def create_app(settings: Settings | None = None):
             with suppress(asyncio.CancelledError):
                 await task
 
-    app = FastAPI(title="Nomi Auth", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Nomi Auth", version="0.1.0", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     app.state.db = db
     app.state.settings = cfg
     limiter = defaultdict(deque)

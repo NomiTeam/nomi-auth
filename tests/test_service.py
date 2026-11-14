@@ -846,3 +846,9 @@ def test_schema_four_upgrade_keeps_existing_accounts_and_sessions(client):
         )
     assert client.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 204
 
+
+def test_service_exposes_no_documentation_web_pages_or_schema(client):
+    for path in ("/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"):
+        response = client.get(path)
+        assert response.status_code == 404
+        assert response.headers["content-type"].startswith("application/json")

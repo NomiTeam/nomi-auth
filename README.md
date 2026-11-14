@@ -11,7 +11,7 @@ uv sync
 uv run uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-接口文档 `/docs`，健康检查 `/health`，认证根路径 `/api/yggdrasil/`。公网地址使用 HTTPS。
+接口文档见 [API.md](API.md)，健康检查 `/health`，认证根路径 `/api/yggdrasil/`。公网地址使用 HTTPS。服务不提供 HTML 文档页面或 OpenAPI JSON 入口。
 
 ## 账号与数据
 
@@ -48,6 +48,6 @@ uv run python -m nomi_auth.cli enable 注册时的账号名
 
 ## 部署
 
-`deploy/` 提供可选的 systemd 和 Nginx 通用模板，按自己的环境修改路径、域名和证书。真实配置、数据库与私钥仅保存在部署环境中。
+`deploy/` 提供可选的 systemd 和 Nginx 通用模板，按自己的环境修改路径、域名和证书。配置统一由根目录 `.env.example` 复制为应用目录下的 `.env`，systemd 从工作目录加载它。真实配置、数据库与私钥仅保存在部署环境中。
 
 检查代码：`uv run pytest -q`、`uv run ruff check src tests`。默认跑 SQLite；设置 `NOMI_TEST_MYSQL_DATABASE`、`NOMI_TEST_MYSQL_USER`、`NOMI_TEST_MYSQL_PASSWORD` 后同一测试套件也跑真实 MySQL/MariaDB，可选 `NOMI_TEST_MYSQL_HOST/PORT`。测试库名必须以 `nomi_auth_test_` 开头，测试会清空其中业务数据，勿使用生产库。
