@@ -33,6 +33,7 @@ def main():
     db = Database.from_settings(cfg)
     if args.command == "migrate-database":
         from .transfer import import_sqlite
+
         counts = import_sqlite(args.source, db)
         print(f"Migration verified: {sum(counts.values())} rows; source unchanged.")
         return

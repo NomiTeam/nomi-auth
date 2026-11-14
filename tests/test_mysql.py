@@ -41,8 +41,10 @@ def test_cross_instance_first_claimant_wins(mysql_settings):
     second = TestClient(create_app(mysql_settings))
     request = request_account(first)
     with ThreadPoolExecutor(2) as executor:
-        futures = [executor.submit(verify, client, request, member=str(i), event=str(i))
-                   for i, client in enumerate((first, second))]
+        futures = [
+            executor.submit(verify, client, request, member=str(i), event=str(i))
+            for i, client in enumerate((first, second))
+        ]
         assert sorted(f.result().status_code for f in futures) == [200, 409]
     with first.app.state.db.read() as conn:
         assert conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 1
@@ -73,7 +75,9 @@ def test_writer_lock_and_rollback_across_instances(mysql_settings):
 
 
 def test_sqlite_migration_preserves_sessions_key_and_every_row(mysql_settings, tmp_path):
-    source_cfg = mysql_settings.model_copy(update={"database_backend": "sqlite", "data_dir": tmp_path / "original"})
+    source_cfg = mysql_settings.model_copy(
+        update={"database_backend": "sqlite", "data_dir": tmp_path / "original"}
+    )
     source_app = create_app(source_cfg)
     source_client = TestClient(source_app)
     create_account(source_client)
@@ -94,14 +98,23 @@ def test_sqlite_migration_preserves_sessions_key_and_every_row(mysql_settings, t
         import_sqlite(source_file, target)
     migrated = TestClient(create_app(target_cfg))
     assert migrated.post("/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 204
-    assert login(migrated, event="after-migration")["game"]["selectedProfile"] == session["game"]["selectedProfile"]
-    assert (restored / "texture-signing.pem").read_bytes() == (source_cfg.data_dir / "texture-signing.pem").read_bytes()
+    assert (
+        login(migrated, event="after-migration")["game"]["selectedProfile"]
+        == session["game"]["selectedProfile"]
+    )
+    assert (restored / "texture-signing.pem").read_bytes() == (
+        source_cfg.data_dir / "texture-signing.pem"
+    ).read_bytes()
     mysql_backup = tmp_path / "mysql-backup.tar.gz"
     backup_data(target, mysql_backup)
     restore_data(mysql_backup, tmp_path / "back-to-sqlite")
     sqlite_cfg = source_cfg.model_copy(update={"data_dir": tmp_path / "back-to-sqlite"})
-    assert TestClient(create_app(sqlite_cfg)).post(
-        "/api/yggdrasil/authserver/validate", json=session["game"]).status_code == 204
+    assert (
+        TestClient(create_app(sqlite_cfg))
+        .post("/api/yggdrasil/authserver/validate", json=session["game"])
+        .status_code
+        == 204
+    )
 
 
 def test_import_failure_rolls_back_all_tables(mysql_settings, tmp_path):
@@ -109,8 +122,10 @@ def test_import_failure_rolls_back_all_tables(mysql_settings, tmp_path):
     with source.write() as conn:
         conn.execute("INSERT INTO accounts VALUES('account','Alice','alice','active',1)")
         # Deliberately exceed MySQL's supported identifier size after an account was copied.
-        conn.execute("INSERT INTO profiles(uuid,account_id,name,name_normalized) VALUES(?,?,?,?)",
-                     ("z" * 65, "account", "Alice", "alice"))
+        conn.execute(
+            "INSERT INTO profiles(uuid,account_id,name,name_normalized) VALUES(?,?,?,?)",
+            ("z" * 65, "account", "Alice", "alice"),
+        )
     target = Database.from_settings(mysql_settings)
     with pytest.raises(pymysql.DataError):
         import_sqlite(source.path, target)
@@ -123,8 +138,10 @@ def test_import_failure_rolls_back_all_tables(mysql_settings, tmp_path):
 
 def test_connection_failure_returns_503_without_credentials(mysql_settings, monkeypatch):
     app = create_app(mysql_settings)
+
     def unavailable():
         raise pymysql.OperationalError(2003, "private-connection-detail")
+
     monkeypatch.setattr(app.state.db, "connect", unavailable)
     response = TestClient(app).get("/health")
     assert response.status_code == 503
@@ -159,10 +176,13 @@ def test_newer_schema_is_rejected_without_changing_it(mysql_settings):
 
 def test_database_selection_from_env_file(tmp_path):
     env_file = tmp_path / "settings.env"
-    env_file.write_text("NOMI_DATABASE_BACKEND=mariadb\nNOMI_MYSQL_PORT=13306\n"
-                        "NOMI_MYSQL_DATABASE=example\nNOMI_MYSQL_USER=example\n"
-                        "NOMI_MYSQL_PASSWORD=file-secret\nNOMI_BOT_TOKEN=" + "x" * 32 +
-                        "\nNOMI_BOT_APP_ID=app\nNOMI_GROUP_OPENID=group\n")
+    env_file.write_text(
+        "NOMI_DATABASE_BACKEND=mariadb\nNOMI_MYSQL_PORT=13306\n"
+        "NOMI_MYSQL_DATABASE=example\nNOMI_MYSQL_USER=example\n"
+        "NOMI_MYSQL_PASSWORD=file-secret\nNOMI_BOT_TOKEN="
+        + "x" * 32
+        + "\nNOMI_BOT_APP_ID=app\nNOMI_GROUP_OPENID=group\n"
+    )
     cfg = Settings(_env_file=env_file)
     assert cfg.database_backend == "mariadb"
     assert cfg.mysql_port == 13306
@@ -181,8 +201,10 @@ def test_mysql_does_not_create_or_replace_sqlite_file(mysql_settings):
 def test_query_failure_uses_database_error_handler(mysql_settings, monkeypatch):
     app = create_app(mysql_settings)
     monkeypatch.setattr(app.state.db, "cleanup_if_due", lambda timestamp: None)
+
     def unavailable():
         raise pymysql.OperationalError(2013, "private-database-detail")
+
     monkeypatch.setattr(app.state.db, "connect", unavailable)
     response = TestClient(app).get("/health")
     assert response.status_code == 503
@@ -190,23 +212,40 @@ def test_query_failure_uses_database_error_handler(mysql_settings, monkeypatch):
 
 
 def test_cli_migration_backup_disable_and_cleanup(mysql_settings, tmp_path):
-    source_cfg = mysql_settings.model_copy(update={"database_backend": "sqlite", "data_dir": tmp_path / "cli-source"})
+    source_cfg = mysql_settings.model_copy(
+        update={"database_backend": "sqlite", "data_dir": tmp_path / "cli-source"}
+    )
     source_client = TestClient(create_app(source_cfg))
     create_account(source_client)
     session = login(source_client)
     env = os.environ.copy()
-    env.update({"NOMI_DATABASE_BACKEND": "mysql", "NOMI_DATA_DIR": str(source_cfg.data_dir),
-                "NOMI_MYSQL_HOST": mysql_settings.mysql_host,
-                "NOMI_MYSQL_PORT": str(mysql_settings.mysql_port),
-                "NOMI_MYSQL_DATABASE": mysql_settings.mysql_database,
-                "NOMI_MYSQL_USER": mysql_settings.mysql_user,
-                "NOMI_MYSQL_PASSWORD": mysql_settings.mysql_password.get_secret_value(),
-                "NOMI_BOT_TOKEN": "x" * 32, "NOMI_BOT_APP_ID": "app", "NOMI_GROUP_OPENID": "group"})
+    env.update(
+        {
+            "NOMI_DATABASE_BACKEND": "mysql",
+            "NOMI_DATA_DIR": str(source_cfg.data_dir),
+            "NOMI_MYSQL_HOST": mysql_settings.mysql_host,
+            "NOMI_MYSQL_PORT": str(mysql_settings.mysql_port),
+            "NOMI_MYSQL_DATABASE": mysql_settings.mysql_database,
+            "NOMI_MYSQL_USER": mysql_settings.mysql_user,
+            "NOMI_MYSQL_PASSWORD": mysql_settings.mysql_password.get_secret_value(),
+            "NOMI_BOT_TOKEN": "x" * 32,
+            "NOMI_BOT_APP_ID": "app",
+            "NOMI_GROUP_OPENID": "group",
+        }
+    )
+
     def command(*args):
-        result = subprocess.run([sys.executable, "-m", "nomi_auth.cli", *args],
-                                env=env, capture_output=True, text=True, timeout=20, check=False)
+        result = subprocess.run(
+            [sys.executable, "-m", "nomi_auth.cli", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
         assert result.returncode == 0, result.stderr
         return result.stdout
+
     assert "Migration verified" in command("migrate-database", str(source_cfg.data_dir / "nomi-auth.sqlite3"))
     archive = tmp_path / "cli-backup.tar.gz"
     assert "snapshot" in command("backup", str(archive))

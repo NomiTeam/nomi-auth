@@ -59,6 +59,7 @@ class Database:
         if settings.database_backend == "sqlite":
             return cls(settings.data_dir / "nomi-auth.sqlite3")
         from .mysql import MySQLDatabase
+
         return MySQLDatabase(settings)
 
     def __init__(self, path: Path):

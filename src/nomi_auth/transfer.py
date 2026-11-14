@@ -7,8 +7,18 @@ from pathlib import Path
 from .db import Database
 
 TABLES = (
-    "schema_versions", "accounts", "profiles", "identities", "registrations", "receipts",
-    "tokens", "joins", "login_requests", "audit", "refresh_retries", "login_retries",
+    "schema_versions",
+    "accounts",
+    "profiles",
+    "identities",
+    "registrations",
+    "receipts",
+    "tokens",
+    "joins",
+    "login_requests",
+    "audit",
+    "refresh_retries",
+    "login_retries",
 )
 
 
@@ -59,7 +69,10 @@ def import_sqlite(source_path: Path, target: Database):
         # No DDL inside this transaction: failures roll back every imported row.
         with target.write() as destination:
             for table in TABLES:
-                if table != "schema_versions" and destination.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                if (
+                    table != "schema_versions"
+                    and destination.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                ):
                     raise ValueError("Destination database is not empty; refusing to overwrite")
             destination.execute("DELETE FROM schema_versions")
             counts = copy_rows(source, destination)
@@ -68,8 +81,12 @@ def import_sqlite(source_path: Path, target: Database):
                     raise ValueError("Imported row counts do not match")
                 # Compare every field as well as counts, including credentials and UUIDs.
                 columns = [r[1] for r in source.execute(f"PRAGMA table_info({table})")]
-                expected = sorted(tuple(r[name] for name in columns) for r in source.execute(f"SELECT * FROM {table}"))
-                actual = sorted(tuple(r[name] for name in columns) for r in destination.execute(f"SELECT * FROM {table}"))
+                expected = sorted(
+                    tuple(r[name] for name in columns) for r in source.execute(f"SELECT * FROM {table}")
+                )
+                actual = sorted(
+                    tuple(r[name] for name in columns) for r in destination.execute(f"SELECT * FROM {table}")
+                )
                 if expected != actual:
                     raise ValueError("Imported data differs from source")
         return counts

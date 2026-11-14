@@ -152,22 +152,30 @@ class MySQLDatabase(Database):
     def connect(self):
         cfg = self.settings
         raw = pymysql.connect(
-            host=cfg.mysql_host, port=cfg.mysql_port, user=cfg.mysql_user,
-            password=cfg.mysql_password.get_secret_value(), database=cfg.mysql_database,
-            unix_socket=cfg.mysql_unix_socket, charset="utf8mb4", autocommit=True,
-            connect_timeout=cfg.database_timeout, read_timeout=cfg.database_timeout,
+            host=cfg.mysql_host,
+            port=cfg.mysql_port,
+            user=cfg.mysql_user,
+            password=cfg.mysql_password.get_secret_value(),
+            database=cfg.mysql_database,
+            unix_socket=cfg.mysql_unix_socket,
+            charset="utf8mb4",
+            autocommit=True,
+            connect_timeout=cfg.database_timeout,
+            read_timeout=cfg.database_timeout,
             write_timeout=cfg.database_timeout,
             sql_mode="STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION",
             ssl_ca=str(cfg.mysql_ssl_ca) if cfg.mysql_ssl_ca else None,
-            ssl_verify_cert=bool(cfg.mysql_ssl_ca), ssl_verify_identity=bool(cfg.mysql_ssl_ca),
+            ssl_verify_cert=bool(cfg.mysql_ssl_ca),
+            ssl_verify_identity=bool(cfg.mysql_ssl_ca),
         )
         return Connection(raw)
 
     @contextmanager
     def write(self):
         with self.read() as conn:
-            locked = conn.execute("SELECT GET_LOCK(?, ?)",
-                                  (self.lock_name, self.settings.database_timeout)).fetchone()[0]
+            locked = conn.execute(
+                "SELECT GET_LOCK(?, ?)", (self.lock_name, self.settings.database_timeout)
+            ).fetchone()[0]
             if locked != 1:
                 raise pymysql.OperationalError(1205, "Timed out waiting for Nomi database writer")
             # The read context closes this connection, releasing the advisory lock on every exit.

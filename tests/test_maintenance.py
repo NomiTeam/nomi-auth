@@ -21,14 +21,20 @@ SKIN_HASH = hashlib.sha256(b"skin").hexdigest()
 def data(database_settings):
     root = database_settings.data_dir
     db = Database.from_settings(database_settings)
-    (root / "texture-signing.pem").write_bytes(rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    (root / "texture-signing.pem").write_bytes(
+        rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+        )
+    )
     (root / "textures").mkdir()
     name = SKIN_HASH
     (root / "textures" / name).write_bytes(b"skin")
     with db.write() as conn:
         conn.execute("INSERT INTO accounts VALUES('account','Alice','alice','active',1)")
-        conn.execute("INSERT INTO profiles(uuid,account_id,name,name_normalized,skin_hash) VALUES('profile','account','Alice','alice',?)", (name,))
+        conn.execute(
+            "INSERT INTO profiles(uuid,account_id,name,name_normalized,skin_hash) VALUES('profile','account','Alice','alice',?)",
+            (name,),
+        )
     return db
 
 
@@ -41,7 +47,9 @@ def test_complete_backup_restore_and_overwrite_protection(data, tmp_path):
     assert archive.read_bytes() == original
     destination = tmp_path / "restored"
     restore_data(archive, destination)
-    assert (destination / "texture-signing.pem").read_bytes() == (data.path.parent / "texture-signing.pem").read_bytes()
+    assert (destination / "texture-signing.pem").read_bytes() == (
+        data.path.parent / "texture-signing.pem"
+    ).read_bytes()
     assert (destination / "textures" / (SKIN_HASH)).read_bytes() == b"skin"
     with sqlite3.connect(destination / "nomi-auth.sqlite3") as conn:
         assert conn.execute("SELECT name,uuid FROM profiles").fetchone() == ("Alice", "profile")

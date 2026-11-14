@@ -16,9 +16,7 @@ from nomi_auth.config import Settings
 
 @pytest.fixture
 def client(database_settings):
-    return TestClient(
-        create_app(database_settings)
-    )
+    return TestClient(create_app(database_settings))
 
 
 def private(request):
@@ -263,18 +261,32 @@ def test_complete_snapshot_restores_login_skin_and_signature(client, tmp_path):
     session = login(client)
     png = io.BytesIO()
     Image.new("RGBA", (64, 64), "blue").save(png, format="PNG")
-    uploaded = client.put("/api/v1/me/profile/skin",
+    uploaded = client.put(
+        "/api/v1/me/profile/skin",
         headers={"Authorization": "Bearer " + session["management_token"]},
-        files={"image": ("skin.png", png.getvalue(), "image/png")}).json()
+        files={"image": ("skin.png", png.getvalue(), "image/png")},
+    ).json()
     archive = tmp_path / "complete.tar.gz"
     backup_data(client.app.state.db, archive)
     restore_data(archive, tmp_path / "restored")
-    restored = TestClient(create_app(Settings(data_dir=tmp_path / "restored", bot_token="x" * 32,
-                                            bot_app_id="app", group_openid="group")))
-    assert restored.get("/api/yggdrasil/").json()["signaturePublickey"] == client.get("/api/yggdrasil/").json()["signaturePublickey"]
-    assert restored.get("/textures/" + uploaded["hash"]).content == client.get("/textures/" + uploaded["hash"]).content
-    assert restored.get("/api/v1/game/profile", headers={"Authorization": "Bearer " + session["game"]["accessToken"]}).json() == {
-        "id": session["game"]["selectedProfile"]["id"], "name": "Alice"}
+    restored = TestClient(
+        create_app(
+            Settings(
+                data_dir=tmp_path / "restored", bot_token="x" * 32, bot_app_id="app", group_openid="group"
+            )
+        )
+    )
+    assert (
+        restored.get("/api/yggdrasil/").json()["signaturePublickey"]
+        == client.get("/api/yggdrasil/").json()["signaturePublickey"]
+    )
+    assert (
+        restored.get("/textures/" + uploaded["hash"]).content
+        == client.get("/textures/" + uploaded["hash"]).content
+    )
+    assert restored.get(
+        "/api/v1/game/profile", headers={"Authorization": "Bearer " + session["game"]["accessToken"]}
+    ).json() == {"id": session["game"]["selectedProfile"]["id"], "name": "Alice"}
 
 
 def test_clearing_old_skin_starts_retention_when_unreferenced(client):
@@ -288,8 +300,9 @@ def test_clearing_old_skin_starts_retention_when_unreferenced(client):
     headers = {"Authorization": "Bearer " + session["management_token"]}
     png = io.BytesIO()
     Image.new("RGBA", (64, 64), "blue").save(png, format="PNG")
-    uploaded = client.put("/api/v1/me/profile/skin", headers=headers,
-        files={"image": ("skin.png", png.getvalue(), "image/png")}).json()
+    uploaded = client.put(
+        "/api/v1/me/profile/skin", headers=headers, files={"image": ("skin.png", png.getvalue(), "image/png")}
+    ).json()
     path = client.app.state.db.path.parent / "textures" / uploaded["hash"]
     old = time.time() - 90000
     os.utime(path, (old, old))
@@ -318,18 +331,30 @@ def test_password_routes_removed_and_legacy_auth_disabled(client):
     with client.app.state.db.read() as conn:
         for table in ("accounts", "registrations"):
             if client.app.state.db.backend == "mysql":
-                columns = {r[0] for r in conn.execute(
-                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?",
-                    (table,))}
+                columns = {
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?",
+                        (table,),
+                    )
+                }
             else:
                 columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
             assert "password_hash" not in columns
 
 
 def test_non_ascii_bot_credential_is_rejected_without_server_error(client):
-    response = client.post("/internal/v1/logins/verify", headers={"Authorization": b"Bearer \xff"}, json={
-        "code": "ABCD", "bot_app_id": "app", "group_openid": "group", "member_openid": "member", "event_id": "invalid-auth"
-    })
+    response = client.post(
+        "/internal/v1/logins/verify",
+        headers={"Authorization": b"Bearer \xff"},
+        json={
+            "code": "ABCD",
+            "bot_app_id": "app",
+            "group_openid": "group",
+            "member_openid": "member",
+            "event_id": "invalid-auth",
+        },
+    )
     assert response.status_code == 401 and response.json()["code"] == "UNAUTHORIZED"
 
 

@@ -18,10 +18,16 @@ def cleanup_textures(db: Database, timestamp: int, retention: int = 86400):
     """Keep referenced textures and recently uploaded files, including interrupted uploads."""
     removed = 0
     with db.write() as conn:
-        referenced = {row[0] for row in conn.execute("SELECT skin_hash FROM profiles WHERE skin_hash IS NOT NULL")}
+        referenced = {
+            row[0] for row in conn.execute("SELECT skin_hash FROM profiles WHERE skin_hash IS NOT NULL")
+        }
         for path in (db.path.parent / "textures").glob("*"):
-            if (path.is_file() and not path.is_symlink() and path.name not in referenced
-                    and path.stat().st_mtime <= timestamp - retention):
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and path.name not in referenced
+                and path.stat().st_mtime <= timestamp - retention
+            ):
                 path.unlink()
                 removed += 1
     return removed
@@ -37,14 +43,20 @@ def validate_snapshot(directory: Path):
     if not isinstance(key, RSAPrivateKey):
         raise TypeError("Snapshot signing key must be RSA")
     with closing(sqlite3.connect(directory / "nomi-auth.sqlite3")) as conn:
-        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or conn.execute("PRAGMA foreign_key_check").fetchone():
+        if (
+            conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
+            or conn.execute("PRAGMA foreign_key_check").fetchone()
+        ):
             raise ValueError("Snapshot database is corrupt")
         for row in conn.execute("SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"):
             name = row[0]
             if not re.fullmatch(r"[0-9a-f]{64}", name) or not (directory / "textures" / name).is_file():
                 raise ValueError("Snapshot is missing a referenced texture")
             texture = directory / "textures" / name
-            if texture.stat().st_size > 1024 * 1024 or hashlib.sha256(texture.read_bytes()).hexdigest() != name:
+            if (
+                texture.stat().st_size > 1024 * 1024
+                or hashlib.sha256(texture.read_bytes()).hexdigest() != name
+            ):
                 raise ValueError("Snapshot contains a corrupt texture")
 
 
@@ -59,13 +71,16 @@ def backup_data(db: Database, destination: Path):
         with db.write() as locked:
             if db.backend == "mysql":
                 from .transfer import export_sqlite
+
                 export_sqlite(locked, root / "nomi-auth.sqlite3")
             else:
                 with db.read() as source, closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as target:
                     source.backup(target)
             shutil.copyfile(db.path.parent / "texture-signing.pem", root / "texture-signing.pem")
             with closing(sqlite3.connect(root / "nomi-auth.sqlite3")) as conn:
-                for (name,) in conn.execute("SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"):
+                for (name,) in conn.execute(
+                    "SELECT DISTINCT skin_hash FROM profiles WHERE skin_hash IS NOT NULL"
+                ):
                     if not re.fullmatch(r"[0-9a-f]{64}", name):
                         raise ValueError("Invalid texture reference")
                     shutil.copyfile(db.path.parent / "textures" / name, root / "textures" / name)
@@ -86,7 +101,6 @@ def backup_data(db: Database, destination: Path):
             raise
 
 
-
 def restore_data(archive_path: Path, destination: Path):
     """Restore only into a new directory; never overwrite a running service's data."""
     destination = destination.resolve()
@@ -100,7 +114,9 @@ def restore_data(archive_path: Path, destination: Path):
         with tarfile.open(archive_path, "r:gz") as archive:
             seen = set()
             for member in archive:
-                if not member.isfile() or not re.fullmatch(r"(?:nomi-auth\.sqlite3|texture-signing\.pem|textures/[0-9a-f]{64})", member.name):
+                if not member.isfile() or not re.fullmatch(
+                    r"(?:nomi-auth\.sqlite3|texture-signing\.pem|textures/[0-9a-f]{64})", member.name
+                ):
                     raise ValueError("Unexpected or unsafe backup entry")
                 if member.name in seen:
                     raise ValueError("Duplicate backup entry")
