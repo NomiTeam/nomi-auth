@@ -1,1 +1,0 @@
-"""Nomi authentication service."""

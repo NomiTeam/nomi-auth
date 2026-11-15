@@ -1,12 +1,14 @@
-"""Local maintenance commands. Run with the service's environment and filesystem access."""
+"""
+Local maintenance commands. Run with the service's environment and filesystem access.
+"""
 
 import argparse
 import time
 from pathlib import Path
 
-from .config import Settings
-from .db import Database
-from .maintenance import backup_data, cleanup_textures, restore_data
+from src.core.config import Settings
+from src.storage.database import Database
+from src.storage.maintenance import backup_data, cleanup_textures, restore_data
 
 
 def main():
@@ -22,37 +24,52 @@ def main():
     enable = sub.add_parser("enable")
     enable.add_argument("login_name")
     sub.add_parser("cleanup")
+    migrate = sub.add_parser("migrate-database")
+    migrate.add_argument(
+        "source", type=Path, help="Schema-5 SQLite database (source is read-only)"
+    )
     args = parser.parse_args()
     if args.command == "restore":
         restore_data(args.archive, args.destination)
         print(f"Restored data directory: {args.destination}")
         return
-    cfg = Settings()
-    db = Database(cfg.data_dir / "nomi-auth.sqlite3")
+    settings = Settings()
+    database = Database.from_settings(settings)
+    if args.command == "migrate-database":
+        from src.storage.transfer import import_sqlite
+
+        counts = import_sqlite(args.source, database)
+        print(f"Migration verified: {sum(counts.values())} rows; source unchanged.")
+        return
     if args.command == "backup":
-        backup_data(db, args.destination)
+        backup_data(database, args.destination)
         print(f"Complete data snapshot: {args.destination}")
         return
     timestamp = int(time.time())
     if args.command == "cleanup":
-        db.cleanup(timestamp)
-        cleanup_textures(db, timestamp)
-        print("Expired transient data deleted; receipts and audit retained for one day.")
+        database.cleanup(timestamp)
+        cleanup_textures(database, timestamp)
+        print(
+            "Expired transient data deleted; receipts and audit retained for one day."
+        )
         return
-    with db.write() as conn:
-        row = conn.execute(
-            "SELECT id FROM accounts WHERE login_normalized=?", (args.login_name.lower(),)
+    with database.write() as connection:
+        row = connection.execute(
+            "SELECT id FROM accounts WHERE login_normalized=?",
+            (args.login_name.lower(),),
         ).fetchone()
         if not row:
             parser.error("Account not found")
         status = "disabled" if args.command == "disable" else "active"
-        conn.execute("UPDATE accounts SET status=? WHERE id=?", (status, row["id"]))
-        conn.execute("DELETE FROM tokens WHERE account_id=?", (row["id"],))
-        conn.execute(
+        connection.execute(
+            "UPDATE accounts SET status=? WHERE id=?", (status, row["id"])
+        )
+        connection.execute("DELETE FROM tokens WHERE account_id=?", (row["id"],))
+        connection.execute(
             "DELETE FROM joins WHERE profile_id IN (SELECT uuid FROM profiles WHERE account_id=?)",
             (row["id"],),
         )
-        conn.execute(
+        connection.execute(
             "INSERT INTO audit(action,account_id,created_at) VALUES(?,?,?)",
             (args.command, row["id"], timestamp),
         )

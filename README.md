@@ -1,40 +1,106 @@
 # Nomi Auth
 
-FastAPI + SQLite 的单群账号与 Yggdrasil 服务，供 [Nomi 启动器](https://github.com/NomiTeam/nomi-launcher)和 [QQ 机器人插件](https://github.com/NomiTeam/nomi-auth-plugin)使用，不存储用户密码。
+这是一个群验证码账号服务，也提供 Minecraft 使用的 Yggdrasil 接口。玩家通过 [Nomi Launcher](https://github.com/NomiTeam/nomi-launcher) 申请验证码，再由 [机器人插件](https://github.com/NomiTeam/nomi-auth-plugin) 确认群成员身份，不使用密码。
 
-## 本地运行
+## 环境
 
-需要 Python 3.12/3.13 和 uv。复制 `.env.example` 为 `.env`，填写机器人应用 ID、群 OpenID 和与插件一致的服务凭证，再执行：
+- Python 3.12 或 3.13
+- uv
+- SQLite，或独立的 MySQL/MariaDB 数据库
 
-```text
+## 运行
+
+将 `.env.example` 复制为 `.env`，填写机器人应用 ID、群 OpenID 和双方一致的服务凭证，然后执行：
+
+```shell
 uv sync
-uv run uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1
+uv run uvicorn src.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-接口文档 `/docs`，健康检查 `/health`，认证根路径 `/api/yggdrasil/`。公网地址使用 HTTPS。
+接口说明见 [API.md](API.md)。`/health` 检查应用与数据库连接；认证根路径为 `/api/yggdrasil/`。服务不提供 HTML 页面，也不开放在线文档或 OpenAPI JSON。公网入口应使用 HTTPS。
 
-## 账号与数据
+## 配置
 
-统一申请登录码：已有账号直接登录，未注册成员在群内提交 `注册 <id>`。申请有效期默认 5 分钟，每次验证只签发一组会话。支持本人改名和 HMCL 原生皮肤上传；改名默认冷却 7 天，UUID 不变。
+配置统一放在应用目录的 `.env`，完整字段见 `.env.example`。
 
-游戏令牌默认 24 小时，管理令牌 1 小时；启动器另持有 30 天刷新令牌，使用时单次轮换并重新计算 30 天有效期。登录领取和续期支持同一请求在两分钟内重试，返回原凭据且不延长有效期；重试记录只存哈希和随机值，过期自动清理。刷新接口只接受刷新令牌，停用账号会撤销所有令牌。旧账户需重新群验证一次领取刷新令牌。
+| 配置 | 说明 |
+| --- | --- |
+| `NOMI_PUBLIC_URL` | 对外地址，用于生成皮肤 URL |
+| `NOMI_DATA_DIR` | 数据目录，保存签名密钥和皮肤；SQLite 文件也在这里 |
+| `NOMI_DATABASE_BACKEND` | `sqlite`（默认）、`mysql` 或 `mariadb` |
+| `NOMI_MYSQL_HOST/PORT/DATABASE/USER/PASSWORD` | MySQL/MariaDB 连接配置 |
 
-领取或取消后立即删除申请，失败结果经私密查询后删除。访问时触发合并清理，最多每 30 秒执行一次，后台补扫；日志和消息去重记录保留一天。账号与群绑定长期保留。
+使用 MySQL/MariaDB 时，先创建独立空库和专用用户，给予建表及读写权限。表使用 InnoDB 和 utf8mb4；可选 Unix socket，或通过 `NOMI_MYSQL_SSL_CA` 验证远程连接证书。
 
-SQLite 当前 schema 为 5，启动时自动迁移。升级前创建完整备份；真实配置、数据和密钥不得提交 Git。
+## 账号规则
+
+启动器只需申请登录码。有账号的成员直接登录，没有账号时按机器人提示发送 `注册 ID`，例如 `注册 Alice`。申请默认有效 5 分钟，先完成验证的人认领申请。
+
+ID 为 3–16 位字母、数字或下划线。改名默认冷却 7 天，UUID 不变。皮肤支持默认模型和 slim 模型。
+
+游戏令牌默认 24 小时，管理令牌 1 小时，刷新令牌 30 天。刷新令牌每次使用后轮换。登录领取与续期可使用同一请求 ID 在两分钟内重试，返回原凭据，不延长有效期。
+
+领取或取消后删除申请；过期临时数据自动清理，日志和消息去重记录保留一天。停用账号会撤销令牌，已在线玩家仍需由游戏服踢出。
+
+## 数据维护
+
+```shell
+uv run python -m src.cli backup backups/nomi.tar.gz
+uv run python -m src.cli restore backups/nomi.tar.gz restored-data
+uv run python -m src.cli disable Alice
+uv run python -m src.cli enable Alice
+uv run python -m src.cli cleanup
+```
+
+备份包含数据库、正在使用的皮肤和签名私钥，不能公开。恢复只写入新目录，不覆盖已有数据。
+
+从 SQLite 切换到 MySQL/MariaDB：
+
+1. 停止旧认证服务，创建最终完整备份，保留旧数据目录。
+2. 在目标环境恢复到新目录，将 `NOMI_DATA_DIR` 指向它，配置 MySQL/MariaDB 空库。
+3. 执行 `uv run python -m src.cli migrate-database restored-data/nomi-auth.sqlite3`。
+4. 验证已有账号和皮肤后切换访问入口，避免新旧服务同时写入。
+
+迁移只读源文件，在一个事务中导入并逐字段核对，非空目标会拒绝导入。账号、UUID、群绑定和令牌都会保留。MySQL 的完整备份同样包含 SQLite 快照，因此也能恢复回 SQLite。当前数据库版本为 5，SQLite 旧版本会在启动时升级。
+
+## 项目结构
 
 ```text
-uv run python -m nomi_auth.cli backup backups/nomi.tar.gz
-uv run python -m nomi_auth.cli disable 注册时的账号名
-uv run python -m nomi_auth.cli enable 注册时的账号名
+src/
+├── app.py                 - 创建应用，组合各个管理对象
+├── cli.py                 - 备份、恢复和账号维护入口
+├── core/
+│   ├── config.py          - 服务配置
+│   ├── models.py          - 请求参数
+│   ├── security.py        - 令牌和验证码工具
+│   └── runtime.py         - 限流和后台清理
+├── services/
+│   ├── accounts.py        - 账号校验、创建和令牌签发
+│   ├── logins.py          - 统一登录与群成员注册
+│   ├── registrations.py   - 兼容旧版独立注册流程
+│   ├── sessions.py        - 会话领取、续期和撤销
+│   ├── profiles.py        - 改名和皮肤管理
+│   └── yggdrasil.py       - 游戏认证与材质签名
+└── storage/
+    ├── database.py        - SQLite 事务和表结构升级
+    ├── mysql.py           - MySQL/MariaDB 数据库
+    ├── skins.py           - 皮肤校验和文件存储
+    ├── maintenance.py     - 备份、恢复和清理
+    └── transfer.py        - 数据库迁移与核对
 ```
 
-备份包含数据库、当前使用的皮肤和签名私钥，应妥善保管。恢复到新目录：`uv run python -m nomi_auth.cli restore backups/nomi.tar.gz restored-data`，停服后再切换数据目录。未引用的旧皮肤保留至少一天后自动清理。
+登录、注册和游戏认证共用账号规则，避免各接口各自修改身份。写事务同时保护验证码认领、令牌轮换和皮肤文件发布；MySQL 使用连接级写锁，保留 SQLite 原有的操作顺序。
 
-停用会撤销令牌；已经在线的玩家需由游戏服另行踢出。临时数据自动清理，`cli cleanup` 可手动触发。
+`deploy/` 提供 systemd 和 Nginx 示例。按实际环境修改路径和证书，systemd 从工作目录读取 `.env`。建议单进程运行；多实例的分布式限流和文件共享不在当前实现范围内。
 
-## 部署
+## 开发检查
 
-`deploy/` 提供可选的 systemd 和 Nginx 通用模板，按自己的环境修改路径、域名和证书。真实配置、数据库与私钥仅保存在部署环境中。
+```shell
+uv sync
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run pyrefly check
+uv run pytest -q
+```
 
-检查代码：`uv run pytest -q`、`uv run ruff check src tests`。
+默认测试 SQLite。配置 `NOMI_TEST_MYSQL_DATABASE/USER/PASSWORD` 后，同一套测试也会检查真实 MySQL/MariaDB，可选 `NOMI_TEST_MYSQL_HOST/PORT`。测试会清空业务表，库名必须以 `nomi_auth_test_` 开头，不要使用生产库。

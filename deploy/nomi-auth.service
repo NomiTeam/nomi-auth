@@ -6,7 +6,7 @@ Wants=network-online.target
 User=www-data
 Group=www-data
 WorkingDirectory=/srv/nomi-auth
-ExecStart=/srv/nomi-auth/.venv/bin/uvicorn nomi_auth.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+ExecStart=/srv/nomi-auth/.venv/bin/uvicorn src.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
 RestartSec=5
 UMask=0077
